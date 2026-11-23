@@ -52,8 +52,8 @@ export function admin(config, knowledge, store) {
     next();
   }
 
-  function renderTraining(req, res, message = '', status = 200, attempted) {
-    const files = knowledge.files();
+  async function renderTraining(req, res, message = '', status = 200, attempted) {
+    const files = await knowledge.files();
     const active = files.has(req.query.arquivo) ? req.query.arquivo : files.keys().next().value;
     const tabs = Array.from(files.keys(), name =>
       '<a ' + (name === active ? 'aria-current="page" ' : '') +
@@ -71,17 +71,17 @@ export function admin(config, knowledge, store) {
   }
   router.get('/treinar', (req, res) => renderTraining(req, res,
     req.query.salvo === '1' ? 'Arquivo salvo. A próxima conversa já usa esta versão.' : ''));
-  router.post('/treinar', form, protect, (req, res) => {
+  router.post('/treinar', form, protect, async (req, res) => {
     try {
-      knowledge.save(req.query.arquivo, req.body.texto, req.body.revision);
+      await knowledge.save(req.query.arquivo, req.body.texto, req.body.revision);
       res.redirect(303, '/admin/treinar?salvo=1&arquivo=' + encodeURIComponent(req.query.arquivo));
     } catch (error) {
       if (!(error instanceof KnowledgeError)) throw error;
-      renderTraining(req, res, error.message, 422, { text: req.body.texto, revision: req.body.revision });
+      return renderTraining(req, res, error.message, 422, { text: req.body.texto, revision: req.body.revision });
     }
   });
-  router.get('/operacao', (req, res) => {
-    const jobs = store.pending().map(job => '<form class="card" action="/admin/operacao" method="post">' +
+  router.get('/operacao', async (req, res) => {
+    const jobs = (await store.pending()).map(job => '<form class="card" action="/admin/operacao" method="post">' +
       hidden('_csrf', csrf) + hidden('seq', job.seq) +
       '<p><strong>Evento ' + job.seq + '</strong> · <code>' + escape(job.lead) + '</code><br>' +
       'Referência <code>' + escape(job.reference) + '</code><br>' +
@@ -90,7 +90,7 @@ export function admin(config, knowledge, store) {
       (job.state === 'uncertain' ? '<p>Confira no CRM se a mensagem ou tarefa foi criada antes de repetir.</p>' : '') +
       '<button name="acao" value="tentar">Tentar novamente</button>' +
       '<button class="secondary" name="acao" value="descartar">Encerrar evento</button></form>').join('');
-    const pauses = store.pausedLeads().map(({ lead }) =>
+    const pauses = (await store.pausedLeads()).map(({ lead }) =>
       '<form class="card" action="/admin/operacao" method="post">' + hidden('_csrf', csrf) +
       hidden('lead', lead) + '<p><code>' + escape(lead) +
       '</code></p><button name="acao" value="reativar">Reativar IA</button></form>').join('');
@@ -98,13 +98,13 @@ export function admin(config, knowledge, store) {
       '<h2>Eventos que precisam de atenção</h2>' + (jobs || '<p>Nenhum evento pendente.</p>') +
       '<h2>Leads com a IA pausada</h2>' + (pauses || '<p>Nenhum lead pausado.</p>')));
   });
-  router.post('/operacao', form, protect, (req, res) => {
+  router.post('/operacao', form, protect, async (req, res) => {
     const { acao, seq, lead } = req.body;
     const applied = acao === 'reativar' && typeof lead === 'string'
-      ? store.resume(lead)
-      : /^\d{1,14}$/.test(seq ?? '') && store.resolve(Number(seq), acao);
+      ? await store.resume(lead)
+      : /^\d{1,14}$/.test(seq ?? '') && await store.resolve(seq, acao);
     if (!applied) return res.status(409).type('html').send(page('Ação indisponível',
-      '<p>Atualize a página de operação. Para reativar um lead, resolva antes a tarefa de transbordo pendente.</p>'));
+      '<p>Atualize a página de operação. Para reativar um lead, resolva a tarefa de transbordo pendente ou aguarde o processamento em andamento.</p>'));
     res.redirect(303, '/admin/operacao');
   });
   return router;

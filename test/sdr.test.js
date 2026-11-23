@@ -4,7 +4,8 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { PGlite } from '@electric-sql/pglite';
 import { createKnowledge, safeReply } from '../src/knowledge.js';
 import { createStore } from '../src/store.js';
 import { createWorker } from '../src/worker.js';
@@ -14,12 +15,29 @@ import { createCrms, OpportunityError } from '../src/crm.js';
 
 const bookingUrl = 'https://agenda.example.com/consulta';
 
-function fixture(t) {
+const schema = readFileSync(new URL('../supabase/schema.sql', import.meta.url), 'utf8');
+
+async function database(dataDir) {
+  const db = new PGlite(dataDir);
+  const client = Object.assign(new EventEmitter(), { query: db.query.bind(db), release() {} });
+  await db.exec(schema);
+  return {
+    query: client.query,
+    connect: async () => client,
+    close: () => db.close()
+  };
+}
+
+async function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'sdr-tests-'));
   const file = join(dir, 'faq.md');
   writeFileSync(file, '# FAQ\n');
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return { dir, file, knowledge: createKnowledge(dir) };
+  const db = await database();
+  t.after(async () => {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { dir, file, knowledge: createKnowledge(dir, db), store: createStore(db) };
 }
 
 function modelResult(name, args) {
@@ -29,7 +47,7 @@ function modelResult(name, args) {
 }
 
 test('o modelo só seleciona respostas publicadas e agendamento precisa de evidência', async t => {
-  const { knowledge } = fixture(t);
+  const { knowledge } = await fixture(t);
   let result;
   let requests = 0;
   const mock = { chat: { completions: { async create(request) {
@@ -56,8 +74,8 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   assert.equal((await decide({ text: 'Pare de me enviar mensagens' }, [])).reason, 'descadastro');
   assert.equal(requests, 7);
 
-  const original = knowledge.files().get('faq.md');
-  knowledge.save('faq.md', '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n',
+  const original = (await knowledge.files()).get('faq.md');
+  await knowledge.save('faq.md', '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n',
     knowledge.revision(original));
   result = modelResult('responder', { resposta_id: 'valor' });
   assert.equal((await decide({ text: 'Qual o preço?' }, [])).text, 'A consulta custa R$ 120,00.');
@@ -68,15 +86,14 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
 });
 
 test('webhooks reais do Express, validação de assinatura e edição autenticada', async t => {
-  const { knowledge, file } = fixture(t);
+  const { knowledge, file, store } = await fixture(t);
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const adminToken = 'a'.repeat(64);
   const webhookToken = 'b'.repeat(64);
   const config = { adminToken, kommo: { webhookToken, accountId: '100', subdomain: 'demo' },
     ghl: { publicKey, locationId: 'branch' } };
-  const store = createStore(':memory:');
   const server = createApp(config, store, knowledge).listen(0, '127.0.0.1');
-  t.after(() => new Promise(resolve => server.close(() => { store.close(); resolve(); })));
+  t.after(() => new Promise(resolve => server.close(resolve)));
   await once(server, 'listening');
   const base = 'http://127.0.0.1:' + server.address().port;
 
@@ -105,13 +122,13 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   kommoForm.set('message[add][0][type]', 'outgoing');
   assert.equal((await requestKommo(webhookToken)).status, 200);
 
-  const ghlJob = store.claim();
+  const ghlJob = await store.claim();
   assert.equal(ghlJob.event.channel, 'WhatsApp');
-  store.finish(ghlJob);
-  const kommoJob = store.claim();
+  await store.finish(ghlJob);
+  const kommoJob = await store.claim();
   assert.equal(kommoJob.event.conversationId, '111');
-  store.finish(kommoJob);
-  assert.equal(store.claim(), null);
+  await store.finish(kommoJob);
+  assert.equal(await store.claim(), null);
 
   const adminUrl = base + '/admin/treinar?arquivo=faq.md';
   assert.equal((await fetch(adminUrl)).status, 401);
@@ -126,7 +143,8 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   assert.equal((await edit('Mudança', 'invalido')).status, 403);
   const content = '# FAQ\n</textarea><script>alert(1)</script>\n';
   assert.equal((await edit(content)).status, 303);
-  assert.equal(readFileSync(file, 'utf8'), content);
+  assert.equal((await knowledge.files()).get('faq.md'), content);
+  assert.equal(readFileSync(file, 'utf8'), '# FAQ\n');
   assert.equal((await edit('Versão antiga')).status, 422);
   const updated = await (await fetch(adminUrl, { headers })).text();
   assert.match(updated, /&lt;\/textarea&gt;&lt;script&gt;/);
@@ -138,48 +156,61 @@ function event(eventId, provider = 'ghl', text = 'Quero agendar') {
 }
 
 test('fila move etapa antes de enviar, registra transbordo e deixa outros CRMs ativos', async t => {
-  const store = createStore(':memory:');
-  t.after(() => store.close());
+  const { store } = await fixture(t);
   const actions = [];
   const crm = {
     async qualify(e) { actions.push(['qualify', e.provider]); },
     async send(e, text) { actions.push(['send', e.provider, text]); },
     async handoff(e) {
-      assert.equal(store.paused('ghl:1:99'), true);
+      assert.equal(await store.paused('ghl:1:99'), true);
       actions.push(['handoff', e.provider]);
     }
   };
   const decide = async e => e.text === 'Humano'
     ? { kind: 'transbordo_humano', reason: 'humano' } : { kind: 'qualificar_agendamento' };
   const worker = createWorker({ store, decide, crms: { kommo: crm, ghl: crm }, bookingUrl });
-  store.enqueue([event('1'), event('2', 'ghl', 'Humano'), event('3'), event('1', 'kommo')]);
+  await store.enqueue([event('1'), event('2', 'ghl', 'Humano'), event('3'), event('1', 'kommo')]);
   for (let i = 0; i < 4; i++) await worker.tick();
   assert.deepEqual(actions.map(action => action.slice(0, 2)), [
     ['qualify', 'ghl'], ['send', 'ghl'], ['handoff', 'ghl'], ['qualify', 'kommo'], ['send', 'kommo']
   ]);
   assert.equal(actions[1][2].split('\n')[1], bookingUrl);
-  assert.equal(store.resume('ghl:1:99'), true);
+  assert.equal(await store.resume('ghl:1:99'), true);
 });
 
-test('restart quarentena efeitos incertos, preserva a etapa e deduplica', async t => {
-  const { dir } = fixture(t);
-  const file = join(dir, 'queue.sqlite');
-  const before = createStore(file);
-  before.enqueue([event('1')]);
-  const claimed = before.claim();
-  before.plan(claimed, { kind: 'qualificar_agendamento' }, 'send');
-  before.startEffect(claimed);
-  before.close();
+test('persistem treinamento, histórico, pausa, fila e deduplicação após reinício', async t => {
+  const { dir } = await fixture(t);
+  const file = join(dir, 'postgres');
+  const original = await database(file);
+  const before = createStore(original);
+  const training = createKnowledge(dir, original);
+  await training.save('faq.md', 'Texto publicado', training.revision('# FAQ\n'));
+  await before.enqueue([event('1'), event('2'), event('3', 'kommo')]);
+  const sent = await before.claim();
+  await before.plan(sent, { kind: 'responder', offer: true }, 'send');
+  await before.finish(sent, 'Quer receber o link?');
+  const handoff = await before.claim();
+  await before.plan(handoff, { kind: 'transbordo_humano', reason: 'humano' }, 'handoff');
+  await before.startEffect(handoff);
+  await original.close();
 
-  const after = createStore(file);
-  t.after(() => after.close());
-  after.recover();
-  after.enqueue([event('1')]);
-  assert.equal(after.claim(), null);
-  const [job] = after.pending();
-  assert.equal(job.state, 'uncertain');
-  assert.equal(after.resolve(job.seq, 'tentar'), true);
-  assert.equal(after.claim().step, 'send');
+  const restarted = await database(file);
+  t.after(() => restarted.close());
+  const after = createStore(restarted);
+  await after.withWorker(async worker => {
+    assert.equal((await worker.pending())[0].state, 'uncertain');
+  });
+  assert.equal(await after.paused('ghl:1:99'), true);
+  assert.equal((await createKnowledge(dir, restarted).files()).get('faq.md'), 'Texto publicado');
+  assert.equal((await after.history(handoff))[0].offered, true);
+  await after.enqueue([event('1')]);
+  const outstanding = await after.claim();
+  assert.equal(outstanding.event.eventId, '3');
+  await after.finish(outstanding);
+  assert.equal(await after.claim(), null);
+  const [job] = await after.pending();
+  assert.equal(await after.resolve(job.seq, 'tentar'), true);
+  assert.equal((await after.claim()).step, 'handoff');
 });
 
 test('GHL recusa oportunidades ambíguas e CRM recebe as rotas oficiais', async () => {

@@ -4,22 +4,53 @@ Backend do agente SDR para Kommo e GoHighLevel.
 
 Backend Node.js 24 com Express, OpenAI GPT-4o, adaptadores dos dois CRMs e painel de treinamento. O objetivo comercial é conduzir o lead à agenda. Ao identificar aceite, o agente qualifica o card ou a oportunidade e envia o link configurado. A reserva e a confirmação do horário acontecem na agenda.
 
-## Rodar
+## Publicar no Render Free com Supabase
 
-1. Instale o Node.js 24 e execute os comandos na raiz do projeto.
+### 1. Preparar o banco gratuito
 
-   ```sh
-   cp .env.example .env
-   npm ci
-   openssl rand -hex 32
-   openssl rand -hex 32
-   ```
+1. No [Supabase](https://supabase.com/dashboard), clique em **New project**. Escolha a organização, dê um nome ao projeto e guarde a senha do banco.
+2. No projeto, abra **SQL Editor → New query**. Cole todo o conteúdo de [supabase/schema.sql](supabase/schema.sql) e clique em **Run**. O script pode ser executado novamente sem apagar dados. Ele cria as tabelas em um schema privado, usado pelo servidor via PostgreSQL.
+3. Clique em **Connect** e selecione **Session pooler** na porta **5432**. Copie a URI PostgreSQL, substitua o marcador de senha pela senha do banco e codifique caracteres reservados da senha como em qualquer URL, por exemplo, @ vira %40. Essa URI inteira é o valor de `DATABASE_URL`. Copie a URI sem parâmetros SSL. O Node ativa TLS com verificação do certificado. Se a cadeia de certificados não for confiável no runtime, obtenha o certificado CA nas configurações do banco no Supabase e salve o conteúdo PEM completo em `DATABASE_SSL_CA` no Render.
 
-2. Preencha o `.env` com as credenciais, os IDs e o link real. Use um dos valores aleatórios para `ADMIN_TOKEN` e o outro para `KOMMO_WEBHOOK_TOKEN`.
-3. Execute `npm test` e `npm start`. O serviço abre na porta `3000` por padrão. `/health` verifica se o processo HTTP está disponível.
-4. Configure os webhooks com o endereço HTTPS público do serviço. Para administrar o agente, abra `/admin/treinar`. O usuário é `admin` e a senha é `ADMIN_TOKEN`. Clientes HTTP podem enviar `Authorization: Bearer <ADMIN_TOKEN>`.
+[Conexões do Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres) · [TLS](https://supabase.com/docs/guides/platform/ssl-enforcement)
 
-Em produção, use uma instância do processo por banco SQLite e um volume gravável e persistente para `DATA_DIR` e `KNOWLEDGE_DIR`. Configure HTTPS no proxy reverso e limite o acesso administrativo às pessoas autorizadas a publicar respostas. Retire o token do Kommo dos registros de acesso do proxy e do monitoramento. Renove os tokens fora do processo e reinicie após atualizar o ambiente.
+### 2. Criar o serviço gratuito
+
+1. No [Render Dashboard](https://dashboard.render.com), clique em **New → Blueprint**. Conecte o GitHub, selecione `pedromemoria/Rob-CRC-Lead` e use a branch `main`. O Render lê [render.yaml](render.yaml) na raiz.
+2. Escolha um nome para o Blueprint e preencha os campos solicitados conforme a tabela. Clique em **Deploy Blueprint**.
+3. Em **Events** ou **Logs**, aguarde o deploy ficar **Live**. Abra `https://SEU-SERVICO.onrender.com/health`. O serviço deve retornar `{"status":"ok"}`.
+4. Acesse `/admin/treinar` no mesmo domínio. Entre como admin e use `ADMIN_TOKEN` como senha. Cadastre os webhooks dos CRMs conforme as seções abaixo.
+
+Se já criou o Web Service manualmente, use **Settings** para selecionar GitHub, o repositório e a branch `main`, com runtime **Node**, plano **Free**, **Build Command** `npm ci --omit=dev`, **Start Command** `npm start` e **Health Check Path** `/health`. Adicione as variáveis em **Environment → Add Environment Variable**, inclusive `NODE_VERSION=24.x`, e clique em **Save, rebuild, and deploy**. O serviço usa `PORT` do Render com fallback local de 3000 e escuta em `0.0.0.0`. Os dados persistem no Supabase.
+
+| Variável | Valor |
+| --- | --- |
+| `DATABASE_URL` | URI do Session pooler do Supabase, com senha e porta 5432. |
+| `OPENAI_API_KEY` | Chave da API OpenAI. |
+| `ADMIN_TOKEN` | Segredo de 32 ou mais caracteres URL-safe para entrar no painel. |
+| `AGENDAMENTO_URL` | URL HTTPS da agenda. |
+| `KOMMO_SUBDOMAIN` | Subdomínio Kommo, sem `.kommo.com`. |
+| `KOMMO_ACCOUNT_ID` | ID numérico da conta Kommo. |
+| `KOMMO_ACCESS_TOKEN` | Token Kommo com os escopos descritos abaixo. |
+| `KOMMO_WEBHOOK_TOKEN` | Outro segredo de 32 ou mais caracteres URL-safe. Ele faz parte da URL do webhook Kommo. |
+| `KOMMO_PIPELINE_ID` | ID numérico do funil Kommo. |
+| `KOMMO_STAGE_QUALIFICADO_ID` | ID numérico da etapa aberta de qualificação. |
+| `KOMMO_RESPONSAVEL_ID` | ID numérico do responsável por tarefas. |
+| `GHL_ACCESS_TOKEN` | Token da subconta GoHighLevel com os escopos descritos abaixo. |
+| `GHL_LOCATION_ID` | ID da subconta. |
+| `GHL_PIPELINE_ID` | ID do funil. |
+| `GHL_STAGE_QUALIFICADO_ID` | ID da etapa de qualificação. |
+| `GHL_RESPONSAVEL_ID` | ID do responsável por tarefas. |
+
+Use dois segredos aleatórios distintos para `ADMIN_TOKEN` e `KOMMO_WEBHOOK_TOKEN`. Um gerenciador de senhas pode gerar cada valor com 64 caracteres hexadecimais. `OPENAI_MODEL` e `GHL_API_VERSION` já usam `gpt-4o` e `v3` por padrão. `GHL_WEBHOOK_PUBLIC_KEY` só é necessária para substituir a chave oficial. Mantenha chaves e URI do banco no painel.
+
+Após 15 minutos sem tráfego de entrada, o Render Free pode hibernar. A próxima requisição pode levar cerca de um minuto para despertar o serviço e ultrapassar o prazo do webhook. O PostgreSQL preserva eventos já registrados e a fila retoma ao despertar. Para testar, abra `/health` e aguarde a resposta antes de enviar a mensagem pelo CRM.
+
+[Blueprints do Render](https://render.com/docs/infrastructure-as-code) · [Plano gratuito](https://render.com/docs/free)
+
+### Executar fora do Render
+
+Com Node.js 24, aplique o mesmo schema em um banco PostgreSQL com TLS, copie `.env.example` para `.env`, preencha os valores e execute `npm ci` seguido de `npm start`. Use `npm test` para a suíte com PostgreSQL embutido, sem credenciais de serviços externos.
 
 ## Configurar Kommo
 
@@ -41,7 +72,7 @@ Em produção, use uma instância do processo por banco SQLite e um volume grav�
 
 ## Treinar e publicar respostas
 
-O painel `/admin/treinar` lista os arquivos `.md` e `.txt` em `knowledge/`. Os três arquivos iniciais são `regras_negocio.md`, `quebra_objecoes.md` e `faq.md`. Para adicionar um arquivo, coloque-o nessa pasta e abra o painel. Use nomes com letras ASCII, dígitos, hífen ou sublinhado.
+O painel `/admin/treinar` combina os arquivos iniciais de `knowledge/` com as revisões salvas no PostgreSQL. Uma revisão salva pelo painel tem prioridade sobre o arquivo de mesmo nome no GitHub, inclusive após redeploy. Para adicionar um arquivo `.md` ou `.txt`, inclua-o em `knowledge/` e faça deploy. Use nomes com letras ASCII, dígitos, hífen ou sublinhado.
 
 Escreva o contexto em texto livre. Para autorizar uma frase que possa sair ao lead, adicione-a a um bloco de respostas, com um identificador único e uma frase por linha. O modelo lê as orientações e escolhe o identificador. O servidor envia a frase publicada, preservando seu conteúdo.
 
@@ -53,24 +84,26 @@ valor_consulta | A consulta custa R$ 120,00.
 <!-- fim:sdr -->
 ```
 
-O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada arquivo pode ter até 24 KB e a base total até 96 KB. O formulário valida e troca o arquivo de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
+O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada arquivo pode ter até 24 KB e a base total até 96 KB. O formulário valida e salva a revisão no banco de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
 
 ## Operar o agente
 
 - **Resposta.** O GPT-4o escolhe entre `responder`, `qualificar_agendamento` e `transbordo_humano`. O servidor só aceita uma ferramenta por mensagem e produz a saída usando frases fixas ou publicadas. Para pedidos de avaliação conhecidos, há também redirecionamento programático para a sessão.
 - **Agendamento.** A decisão requer evidência literal da mensagem atual, validada pelo servidor. Um aceite curto exige oferta de agenda no turno anterior da mesma conversa. O link `AGENDAMENTO_URL` é inserido pelo servidor após qualificação no CRM. Se a agenda oferecer confirmação de reserva, ela ocorre na página vinculada.
-- **Transbordo.** Ao detectar pedido de humano, irritação, assunto totalmente fora do escopo, descadastro ou evento sem texto, o servidor pausa o lead e cria tarefa atribuída no CRM. A equipe assume a conversa. Para voltar à IA, use `/admin/operacao`. A reativação limpa o contexto local e descarta mensagens enfileiradas durante a pausa.
+- **Transbordo.** Ao detectar pedido de humano, irritação, assunto totalmente fora do escopo, descadastro ou evento sem texto, o servidor pausa o lead e cria tarefa atribuída no CRM. A equipe assume a conversa. Para voltar à IA, use `/admin/operacao`. A reativação limpa o contexto da conversa e descarta mensagens enfileiradas durante a pausa.
 - **Falhas.** O webhook retorna sucesso após gravar o evento na fila. A fila deduplica por provedor, conta e ID da mensagem. Etapas concluídas ficam registradas antes do próximo efeito. Quando a criação de uma mensagem ou tarefa tem resultado incerto, confira o CRM em `/admin/operacao` antes de escolher **Tentar novamente**. Se o CRM já registrou o efeito ou a equipe decidiu assumir, escolha **Encerrar evento**. Um evento pendente impede que eventos seguintes do mesmo lead avancem e permite que outros leads continuem.
-- **Dados.** A IA usa até 12 interações recentes por conversa, mantidas por até 30 dias. O corpo dos eventos concluídos é apagado da fila e a chave de deduplicação permanece. Eventos pendentes retêm o conteúdo até resolução. Proteja o volume e seus backups como dados de atendimento. O GPT-4o recebe a base, o texto e o contexto local, com `store: false` na solicitação.
+- **Dados.** A IA usa até 12 interações recentes por conversa, mantidas por até 30 dias. O corpo dos eventos concluídos é apagado da fila e a chave de deduplicação permanece. Eventos pendentes retêm o conteúdo até resolução. Proteja o banco e seus backups como dados de atendimento. O GPT-4o recebe a base, o texto e o contexto da conversa, com `store: false` na solicitação.
 - **Credenciais.** Os tokens dos CRMs são fornecidos pelo ambiente. Renove-os antes de expirar. Use a chave oficial Ed25519 embutida ou configure `GHL_WEBHOOK_PUBLIC_KEY` com uma chave SPKI DER em Base64 em caso de rotação.
 
 ## Verificação
 
-`npm test` exercita os endpoints Express, os formatos de webhook, a assinatura do GHL, autorização e edição do treinamento, a seleção de ferramentas, a fila SQLite e as chamadas dos adaptadores com APIs simuladas. Faça um teste real em cada conta com credenciais e canais configurados antes de liberar tráfego comercial.
+`npm test` exercita os endpoints Express, os formatos de webhook, a assinatura do GHL, autorização e edição do treinamento, a seleção de ferramentas, a fila em PostgreSQL e as chamadas dos adaptadores com APIs simuladas. Faça um teste real em cada conta com credenciais e canais configurados antes de liberar tráfego comercial.
 
 ```text
 .
 ├── .env.example
+├── render.yaml
+├── supabase/schema.sql
 ├── knowledge/
 │   ├── faq.md
 │   ├── quebra_objecoes.md
@@ -80,6 +113,7 @@ O preço acima é apenas um exemplo de formatação. Publique somente dados come
 │   ├── agent.js
 │   ├── config.js
 │   ├── crm.js
+│   ├── database.js
 │   ├── knowledge.js
 │   ├── server.js
 │   ├── store.js

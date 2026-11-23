@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import fs from 'fs-extra';
+import { createPool } from './database.js';
 import express from 'express';
 import { loadConfig } from './config.js';
 import { createStore } from './store.js';
@@ -33,13 +33,26 @@ export function createApp(config, store, knowledge) {
   return app;
 }
 
-export function start() {
+export async function start() {
   const config = loadConfig();
-  fs.ensureDirSync(config.dataDir, { mode: 0o700 });
-  const knowledge = createKnowledge(config.knowledgeDir);
-  knowledge.load();
-  const store = createStore(path.join(config.dataDir, 'sdr.sqlite'));
-  store.recover();
+  const pool = createPool(config.database);
+  let knowledge;
+  try {
+    const { rows: [schema] } = await pool.query(
+      "SELECT to_regclass('sdr.jobs') AS jobs, to_regclass('sdr.history') AS history," +
+      " to_regclass('sdr.paused') AS paused, to_regclass('sdr.knowledge') AS knowledge"
+    );
+    if (!Object.values(schema).every(Boolean)) {
+      throw new Error('Execute supabase/schema.sql no SQL Editor antes de iniciar.');
+    }
+    knowledge = createKnowledge(fileURLToPath(new URL('../knowledge/', import.meta.url)), pool);
+    await knowledge.load();
+  } catch (error) {
+    await pool.end();
+    if (!error.code) throw error;
+    throw new Error('Falha ao acessar o PostgreSQL. Confira DATABASE_URL, TLS e o schema (código ' + error.code + ').');
+  }
+  const store = createStore(pool);
   const worker = createWorker({
     store, decide: createAgent(config.openai, knowledge),
     crms: createCrms(config), bookingUrl: config.bookingUrl
@@ -57,7 +70,7 @@ export function start() {
       new Promise(resolve => server.close(resolve)),
       worker.stop()
     ]);
-    store.close();
+    await pool.end();
   }
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
@@ -65,7 +78,7 @@ export function start() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    start();
+    await start();
   } catch (error) {
     console.error('Falha ao iniciar. ' + (error instanceof TypeError ? 'Verifique as variáveis de ambiente.' : error.message));
     process.exitCode = 1;

@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { createPublicKey } from 'node:crypto';
 import dotenv from 'dotenv';
 
@@ -35,6 +34,12 @@ export function loadConfig() {
     type: 'spki'
   });
   if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('Chave GHL inválida');
+  const databaseUrl = required('DATABASE_URL');
+  const database = new URL(databaseUrl);
+  if (!['postgres:', 'postgresql:'].includes(database.protocol) || !database.hostname || !database.username ||
+      [...database.searchParams.keys()].some(key => /^ssl|^uselibpqcompat$/i.test(key))) {
+    throw new Error('Configure DATABASE_URL com a URI PostgreSQL, sem parâmetros SSL');
+  }
   const port = Number(env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT inválida');
   const kommoStageId = numericId('KOMMO_STAGE_QUALIFICADO_ID');
@@ -43,8 +48,7 @@ export function loadConfig() {
   return {
     port,
     host: env.HOST || '0.0.0.0',
-    dataDir: path.resolve(env.DATA_DIR || './data'),
-    knowledgeDir: path.resolve(env.KNOWLEDGE_DIR || './knowledge'),
+    database: { url: databaseUrl, ca: env.DATABASE_SSL_CA?.replace(/\\n/g, '\n') },
     adminToken,
     bookingUrl,
     openai: { apiKey: required('OPENAI_API_KEY'), model: env.OPENAI_MODEL || 'gpt-4o' },

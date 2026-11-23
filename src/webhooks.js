@@ -66,15 +66,15 @@ export function webhooks(config, store) {
     if (!req.is('application/x-www-form-urlencoded')) return res.sendStatus(415);
     next();
   }, express.urlencoded({ extended: true, limit: '256kb', parameterLimit: 4000, depth: 8, inflate: false }),
-  (req, res) => {
-    store.enqueue(kommoEvents(req.body, config.kommo));
+  async (req, res) => {
+    await store.enqueue(kommoEvents(req.body, config.kommo));
     res.sendStatus(200);
   });
 
   router.post('/ghl', (req, res, next) => {
     if (!req.is('application/json')) return res.sendStatus(415);
     next();
-  }, express.raw({ type: 'application/json', limit: '256kb', inflate: false }), (req, res) => {
+  }, express.raw({ type: 'application/json', limit: '256kb', inflate: false }), async (req, res) => {
     if (!verifyGhl(req.body, req.get('X-GHL-Signature'), config.ghl.publicKey)) return res.sendStatus(401);
     let body;
     try {
@@ -82,7 +82,7 @@ export function webhooks(config, store) {
     } catch {
       return res.sendStatus(400);
     }
-    store.enqueue(ghlEvents(body, config.ghl));
+    await store.enqueue(ghlEvents(body, config.ghl));
     res.sendStatus(200);
   });
   return router;

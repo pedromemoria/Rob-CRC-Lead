@@ -92,7 +92,7 @@ export function createAgent(config, knowledge, client = new OpenAI({
     const reason = explicitHandoff(lead);
     if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
     const assessment = wantsAssessment(lead);
-    const { files, replies: approved } = knowledge.load();
+    const { files, replies: approved } = await knowledge.load();
     const options = new Map([...approved, ...Object.entries(replies)]);
     const last = history.at(-1);
     const result = await client.chat.completions.create({
