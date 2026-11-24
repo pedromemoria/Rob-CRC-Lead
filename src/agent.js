@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { canSelectClinicFact, clinicFacts, matchClinicFact } from './clinic-data.js';
 import { safeReply } from './knowledge.js';
 
 export const replies = {
@@ -35,7 +36,8 @@ const prompt = [
   'Acolha com empatia, entenda superficialmente a necessidade, trate objeções com a base e convide a agendar.',
   'Escolha exatamente uma ferramenta. Jamais escreva mensagens livres, links, datas ou dados para o CRM.',
   'Jamais diagnostique, avalie casos ou prescreva soluções técnicas, clínicas ou financeiras. Encaminhe qualquer pedido assim para a resposta avaliacao.',
-  'Preços, prazos e condições só podem ser comunicados com a seleção de uma resposta publicada na base que corresponda à pergunta. Se faltar informação, use sem_informacao.',
+  'Para dados operacionais, serviços, preços, duração, pagamento e convênios, dê prioridade ao cadastro oficial dados_da_clinica. Escolha em respostas_disponiveis o ID cadastro_ que corresponda à pergunta e à pessoa ou ao serviço citado. Não adivinhe o serviço. Quando o cadastro não cobrir a pergunta, uma resposta publicada da base pode ser usada. Se faltar informação, use sem_informacao.',
+  'O URL do Maps serve apenas como referência interna. Nunca inclua outros links na conversa. A aplicação entrega o link de agendamento depois do aceite.',
   'Se o lead pedir humano, estiver irritado ou sair completamente do escopo, priorize transbordo_humano. Para pedidos de interromper contato, use descadastro.',
   'Use qualificar_agendamento somente com pedido ou aceitação inequívoca de agendamento na mensagem atual. Se for um sim curto, exija que a última resposta tenha sido uma oferta explícita de agendamento.',
   'Não trate pergunta sobre o serviço, negação, adiamento ou interesse hipotético como aceitação. Nunca confirme reserva ou disponibilidade.',
@@ -93,8 +95,9 @@ export function createAgent(config, client = new OpenAI({
     const reason = explicitHandoff(lead);
     if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
     const assessment = wantsAssessment(lead);
-    const { files, replies: approved } = knowledge;
-    const options = new Map([...approved, ...Object.entries(replies)]);
+    const { files, replies: approved, clinicData } = knowledge;
+    const facts = clinicFacts(clinicData);
+    const options = new Map([...approved, ...facts, ...Object.entries(replies)]);
     const last = history.at(-1);
     const result = await client.chat.completions.create({
       model: config.model, temperature: 0, store: false, max_completion_tokens: 300,
@@ -102,6 +105,7 @@ export function createAgent(config, client = new OpenAI({
         { role: 'system', content: prompt },
         { role: 'user', content: JSON.stringify({
           base_de_conhecimento: files,
+          dados_da_clinica: clinicData ?? {},
           feedbacks_da_clinica: knowledge.feedback ?? [],
           documentos_de_referencia: knowledge.references ?? [],
           respostas_disponiveis: Object.fromEntries(options),
@@ -137,8 +141,13 @@ export function createAgent(config, client = new OpenAI({
         allowBooking(event.text, args.trecho, Boolean(last?.offered))) {
       return { kind: 'qualificar_agendamento' };
     }
-    const selected = call?.name === 'responder' ? options.get(args.resposta_id) : null;
-    const text = safeReply(selected) ? selected : replies.convidar;
+    const matched = matchClinicFact(clinicData, facts, event.text, last?.inbound);
+    const selectedId = call?.name === 'responder' && typeof args.resposta_id === 'string' ? args.resposta_id : '';
+    const official = facts.get(selectedId);
+    const selected = official
+      ? (canSelectClinicFact(clinicData, selectedId, event.text, last?.inbound) ? official : replies.sem_informacao)
+      : options.get(selectedId);
+    const text = matched ?? (official || safeReply(selected) ? selected : replies.convidar);
     return { kind: 'responder', text,
       offer: offersBooking(text) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(text) };
   };

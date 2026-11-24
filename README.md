@@ -4,6 +4,8 @@ Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 2
 
 ## Atualizar o Supabase
 
+Aplique [supabase/dados-clinicas.sql](supabase/dados-clinicas.sql) após as migrações anteriores para habilitar os dados e preços por clínica.
+
 Aplique [supabase/contas-admin.sql](supabase/contas-admin.sql) depois das migrações abaixo para habilitar o cadastro individual.
 
 - **Banco multi-clínica já instalado** — Execute [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql) em **SQL Editor → New query → Run**.
@@ -78,6 +80,12 @@ valor_consulta | A consulta custa R$ 120,00.
 ```
 
 O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada campo de treinamento pode ter até 24 KB. O formulário valida e salva a revisão no banco de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
+
+## Dados e preços da clínica
+
+Em **Dados & Preços da Clínica**, cadastre endereço, referência, horário, telefone, profissionais e serviços. Cada serviço pode ter valor ou faixa, duração, formas de pagamento e convênios. Use **Adicionar** ou **Remover** conforme necessário e clique em **Salvar dados e preços**. O formulário aceita até 20 profissionais e 20 serviços por clínica.
+
+O simulador e o atendimento real carregam o cadastro da clínica junto ao treinamento, feedbacks e documentos. Quando a pergunta identifica um dado cadastrado, ele tem prioridade na resposta. O link oficial do Google Maps pode ser aberto no painel. Pelo chat, o robô informa o endereço cadastrado e envia o link de agendamento após o aceite.
 
 ## Feedbacks, arquivos e simulador
 

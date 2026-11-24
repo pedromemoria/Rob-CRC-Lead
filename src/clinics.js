@@ -9,7 +9,7 @@ const numeric = /^[1-9]\d{0,14}$/;
 const externalId = /^[A-Za-z0-9_-]{1,128}$/;
 const webhookSecret = /^[A-Za-z0-9_-]{32,128}$/;
 const columns = 'id,nome_clinica,crm_tipo,crm_account_id,kommo_conta_id,funil_id,etapa_agendamento_id,' +
-  'responsavel_id,agendamento_url,regras_negocio,quebra_objecoes,faq,versao,ativo';
+  'responsavel_id,agendamento_url,regras_negocio,quebra_objecoes,faq,versao,ativo,dados_publicos';
 
 export class ClinicError extends Error {}
 
@@ -18,7 +18,10 @@ export function hashWebhook(secret) {
 }
 
 export function clinicKnowledge(clinic) {
-  return parseKnowledge(trainingFields.map(name => [name + '.md', clinic[name]]));
+  return {
+    ...parseKnowledge(trainingFields.map(name => [name + '.md', clinic[name]])),
+    clinicData: clinic.dados_publicos ?? {}
+  };
 }
 
 function parseSettings(form, current) {
@@ -144,6 +147,14 @@ export function createClinics(database, config, templateDir) {
           stageId: Number(row.etapa_agendamento_id), assignee: Number(row.responsavel_id) } }
         : { ghl: { ...common, locationId: row.crm_account_id, version: config.ghl.version } };
       return { ...crm, provider: row.crm_tipo, bookingUrl: row.agendamento_url, knowledge: clinicKnowledge(row) };
+    },
+    async saveData(clinicId, version, data) {
+      if (typeof version !== 'string' || !/^[1-9][0-9]{0,9}$/.test(version) || Number(version) > 2_147_483_646) return false;
+      const result = await database.query(
+        'UPDATE sdr.clinicas SET dados_publicos=$3,versao=versao+1 WHERE id=$1 AND versao=$2',
+        [clinicId, Number(version), JSON.stringify(data)]
+      );
+      return result.rowCount === 1;
     },
     async save(form, current = null) {
       const { clinic, token, webhookHash, webhookSecret } = parseSettings(form, current);

@@ -1,5 +1,6 @@
 import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
+import { clinicFacts } from './clinic-data.js';
 import { handoffReasons } from './agent.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
@@ -18,7 +19,10 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     const integration = await integrationFor(job.clinica_id);
     if (integration.provider !== job.event.provider) throw new ClinicError('O CRM do evento não corresponde à clínica.');
     const crm = crmFor(integration)[job.event.provider];
-    if (!job.plan) {
+    const officialReplies = new Set(clinicFacts(integration.knowledge.clinicData).values());
+    const allowed = text => safeReply(text) || officialReplies.has(text);
+    const needsDecision = !job.plan || (job.plan.kind === 'responder' && !allowed(job.plan.text));
+    if (needsDecision) {
       const history = await store.history(job);
       const search = [job.event.text, history.at(-1)?.inbound].filter(Boolean).join(' ');
       const [references, corrections] = await Promise.all([
@@ -30,7 +34,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
       if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
       else if (decision.kind === 'qualificar_agendamento') await store.plan(job, decision, 'qualify');
       else {
-        if (!safeReply(decision.text)) throw new KnowledgeError('Resposta inválida');
+        if (!allowed(decision.text)) throw new KnowledgeError('Resposta inválida');
         await store.plan(job, decision, 'send');
       }
     }
@@ -52,7 +56,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     const text = job.plan.kind === 'qualificar_agendamento'
       ? 'Perfeito! Escolha o melhor horário por aqui:\n' + integration.bookingUrl
       : job.plan.text;
-    if (job.plan.kind === 'responder' && !safeReply(text)) throw new KnowledgeError('Resposta inválida');
+    if (job.plan.kind === 'responder' && !allowed(text)) throw new KnowledgeError('Resposta inválida');
     await store.startEffect(job);
     await crm.send(job.event, text);
     await store.finish(job, text);

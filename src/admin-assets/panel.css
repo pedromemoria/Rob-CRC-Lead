@@ -155,3 +155,13 @@ button.danger:hover { background: #fce8e4; }
 @media (max-width: 850px) {
   .side-tools #clinica-busca { grid-column: 1 / -1; }
 }
+
+.clinic-data-row {
+  min-width: 0;
+  margin: 0 0 1rem;
+  padding: .85rem;
+  border: 1px solid var(--line);
+  border-radius: .55rem;
+}
+.clinic-data-row legend { padding: 0 .35rem; font-weight: 680; }
+.clinic-data-row input { display: block; margin-top: .3rem; font-weight: 400; }

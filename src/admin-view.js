@@ -1,4 +1,5 @@
 import { minimumPasswordLength } from './accounts.js';
+import { contactFields, professionalFields, serviceFields, maxRows } from './clinic-data.js';
 import { trainingFields } from './clinics.js';
 
 export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -8,7 +9,7 @@ export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => (
 export const hidden = (name, value) => '<input type="hidden" name="' + escape(name) + '" value="' + escape(value) + '">';
 
 export const tabs = {
-  conexao: 'Conexão & CRM', treinamento: 'Treinamento & Prompts',
+  conexao: 'Conexão & CRM', dados: 'Dados & Preços da Clínica', treinamento: 'Treinamento & Prompts',
   arquivos: 'Arquivos (Base de Conhecimento)', feedback: 'Feedbacks & Aprendizado', teste: 'Testar Robô'
 };
 
@@ -149,6 +150,33 @@ export function library({ clinic, csrf, docs, selected, tab }) {
     (list ? '<ul class="file-list">' + list + '</ul>' : '<p class="muted">Nenhum documento nesta clínica.</p>') + '</section>' +
     (selected ? '<section class="card" id="conteudo-arquivo" tabindex="-1">' + heading(selected.nome, 'Texto extraído') +
       '<pre class="document">' + escape(selected.conteudo) + '</pre></section>' : '');
+}
+
+export function clinicDataView({ clinic, draft, csrf, version }) {
+  const data = draft ?? clinic.dados_publicos ?? {};
+  function rows(items, prefix, title, rowName, fields) {
+    const row = values => '<fieldset class="clinic-data-row" data-data-row><legend>' + rowName + '</legend>' +
+      '<div class="fields">' + fields.map(([key, label, max]) =>
+        '<label class="field">' + escape(label) + '<input name="' + prefix + '_' + key +
+        '" maxlength="' + max + '" value="' + escape(values[key]) + '"></label>').join('') +
+      '</div><button type="button" class="danger" data-remove-data>Remover ' + rowName.toLowerCase() + '</button></fieldset>';
+    return '<section class="card" data-data-group data-max-rows="' + maxRows + '">' + heading(title) +
+      '<div data-data-rows>' + (items?.length ? items : [{}]).map(row).join('') + '</div>' +
+      '<template>' + row({}) + '</template><button type="button" class="secondary" data-add-data>+ Adicionar ' +
+      rowName.toLowerCase() + '</button><span class="status" role="status" data-data-status></span></section>';
+  }
+  const contact = data.contato ?? {};
+  return '<form action="' + escape(adminUrl(clinic.id, undefined, 'dados')) + '" method="post">' +
+    hidden('_csrf', csrf) + hidden('versao', version ?? clinic.versao) +
+    '<section class="card">' + heading('Localização e contato') + '<div class="fields">' +
+    contactFields.map(([key, label, max]) => input(contact, key, label, key === 'maps_url' ? 'url' :
+      key === 'recepcao' ? 'tel' : 'text', ' maxlength="' + max + '"')).join('') + '</div>' +
+    (clinic.dados_publicos?.contato?.maps_url
+      ? '<p><a target="_blank" rel="noopener noreferrer" href="' +
+        escape(clinic.dados_publicos.contato.maps_url) + '">Abrir endereço no Google Maps</a></p>' : '') +
+    '</section>' + rows(data.profissionais, 'prof', 'Corpo clínico', 'Profissional', professionalFields) +
+    rows(data.servicos, 'serv', 'Serviços e tabela de preços', 'Serviço', serviceFields) +
+    '<div class="form-footer"><button>Salvar dados e preços</button></div></form>';
 }
 
 export function simulationClinicPicker(clinics, current) {

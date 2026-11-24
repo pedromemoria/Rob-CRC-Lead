@@ -1,4 +1,5 @@
 import { normalize, explicitHandoff, wantsAssessment, allowBooking, handoffReasons, replies } from './agent.js';
+import { clinicFacts, matchClinicFact } from './clinic-data.js';
 import { terms } from './documents.js';
 
 const words = text => terms(normalize(text));
@@ -10,6 +11,8 @@ function offline(text, history, knowledge) {
   if (reason) return { kind: 'transbordo_humano', reason };
   if (wantsAssessment(normalized)) return { kind: 'responder', text: replies.avaliacao, offer: true };
   if (allowBooking(text, text, Boolean(history.at(-1)?.offered))) return { kind: 'qualificar_agendamento' };
+  const fact = matchClinicFact(knowledge.clinicData, clinicFacts(knowledge.clinicData), text, history.at(-1)?.inbound);
+  if (fact) return { kind: 'responder', text: fact };
   const query = words(text);
   const ranked = Array.from(knowledge.replies, ([id, answer]) => ({
     answer, score: matches(id.replaceAll('_', ' ') + ' ' + answer, query)

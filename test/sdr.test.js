@@ -41,6 +41,7 @@ async function database(dataDir) {
   await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/contas-admin.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../supabase/dados-clinicas.sql', import.meta.url), 'utf8'));
   return {
     query: client.query,
     connect: async () => client,
@@ -556,4 +557,85 @@ test('cadastro por e-mail requer convite, isola a clínica e revoga a sessão', 
   assert.equal((await call('/feedback?clinica=' + assigned, member, { _csrf: csrf, conteudo: 'Da própria clínica' })).status, 303);
   assert.equal((await call('/contas/revogar', owner, { _csrf: ownerCsrf, conta: id })).status, 303);
   assert.equal((await call('/treinar', member)).status, 303);
+});
+
+test('dados e preços salvam por clínica e alimentam o simulador e a decisão real', async t => {
+  const { clinics, db, store } = await fixture(t);
+  const faq = '<!-- respostas:sdr -->\nvalor | A consulta custa R$ 90,00.\n<!-- fim:sdr -->';
+  const first = await clinics.save(clinicForm('ghl', 'first-data', { faq }));
+  const second = await clinics.save(clinicForm('ghl', 'second-data'));
+  let modelContext;
+  let selected = 'valor';
+  const decide = createAgent({ model: 'gpt-4o' }, { chat: { completions: { async create(request) {
+    modelContext = JSON.parse(request.messages[1].content);
+    return modelResult('responder', { resposta_id: selected });
+  } } } });
+  const docs = createDocuments(db);
+  const notes = createFeedback(db);
+  await notes.save(first, 'Orientação da primeira clínica');
+  const server = createApp({ adminToken, ghl: {} }, store, clinics, {
+    documents: docs, feedback: notes, sessions: createSessions(db), decide
+  }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + server.address().port + '/admin';
+  const headers = { Authorization: 'Bearer ' + adminToken };
+  const view = id => base + '/treinar?aba=dados&clinica=' + id;
+  const html = await (await fetch(view(first), { headers })).text();
+  assert.match(html, /Dados &amp; Preços da Clínica/);
+  assert.match(html, /Adicionar serviço/);
+  const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
+  const version = String((await clinics.get(first)).versao);
+  const values = {
+    _csrf: csrf, versao: version, endereco: 'Rua das Flores, 120',
+    referencia: 'Ao lado da praça', maps_url: 'https://maps.app.goo.gl/abc123',
+    horario: 'Segunda a sexta, das 8h às 18h', recepcao: '(85) 98888-1234',
+    prof_nome: 'Dra. Ana Silva', prof_especialidade: 'Urologia', prof_registro: 'CRM-CE 12345',
+    serv_nome: 'Consulta inicial', serv_descricao: 'Consulta presencial',
+    serv_valor: 'R$ 150 a R$ 200', serv_duracao: '40 minutos',
+    serv_pagamento: 'Pix ou cartão', serv_convenios: 'Plano Saúde'
+  };
+  const save = overrides => fetch(base + '/dados?clinica=' + first, {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ ...values, ...overrides })
+  });
+  assert.equal((await save({ maps_url: 'https://maps.app.goo.gl.example.org/fake' })).status, 422);
+  assert.equal((await save({ serv_descricao: 'Veja exemplo.com.br' })).status, 422);
+  assert.equal((await save()).status, 303);
+  assert.equal((await save()).status, 409);
+  assert.match(await (await fetch(view(first), { headers })).text(), /R\$ 150 a R\$ 200/);
+  assert.doesNotMatch(await (await fetch(view(second), { headers })).text(), /Rua das Flores|R\$ 150/);
+  const sim = async (id, text, withAI = false) => (await fetch(base + '/simular?clinica=' + id, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ text, withAI })
+  })).json();
+  assert.equal((await sim(first, 'Quanto custa a consulta inicial?')).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
+  assert.equal((await sim(first, 'Quanto custa a consulta?')).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
+  assert.equal((await sim(first, 'Quanto custa a consulta inicial?', true)).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
+  assert.equal(modelContext.dados_da_clinica.contato.maps_url, values.maps_url);
+  assert.deepEqual(modelContext.feedbacks_da_clinica, ['Orientação da primeira clínica']);
+  assert.equal((await sim(first, 'Qual o WhatsApp da recepção?')).reply, 'Telefone ou WhatsApp da recepção: (85) 98888-1234');
+  assert.equal((await sim(first, 'Qual o CRM da Dra. Ana Silva?')).reply, 'Profissional: Dra. Ana Silva · Urologia · CRM-CE 12345');
+  assert.equal((await sim(first, 'Pode mandar o Google Maps?')).reply, 'Endereço: Rua das Flores, 120');
+  assert.doesNotMatch((await sim(second, 'Quanto custa a consulta inicial?', true)).reply, /150|200/);
+  assert.deepEqual(modelContext.dados_da_clinica, {});
+  selected = 'cadastro_servico_0_valor';
+  assert.equal((await sim(first, 'Quanto custa o implante?', true)).reply, replies.sem_informacao);
+  const integration = await clinics.integration(first);
+  assert.equal(integration.knowledge.clinicData.contato.endereco, values.endereco);
+  const sent = [];
+  selected = 'valor';
+  const worker = createWorker({ store, documents: docs, feedback: notes, decide, integrationFor: clinics.integration,
+    crmFor: () => ({ ghl: { send: async (event, text) => sent.push(text) } })
+  });
+  await store.enqueue([event('structured-data', first, 'first-data', 'Quanto custa a consulta inicial?')]);
+  await worker.tick();
+  assert.deepEqual(sent, ['Valor de Consulta inicial: R$ 150 a R$ 200']);
+
+  await store.enqueue([event('structured-retry', first, 'first-data', 'Quanto custa a consulta inicial?')]);
+  const retry = await store.claim();
+  await store.plan(retry, { kind: 'responder', text: 'Valor de Consulta inicial: R$ 150 a R$ 200' }, 'send');
+  await store.fail(retry, 'queued', 'retry');
+  assert.equal((await save({ versao: String((await clinics.get(first)).versao), serv_valor: 'R$ 220' })).status, 303);
+  await worker.tick();
+  assert.deepEqual(sent, ['Valor de Consulta inicial: R$ 150 a R$ 200', 'Valor de Consulta inicial: R$ 220']);
 });

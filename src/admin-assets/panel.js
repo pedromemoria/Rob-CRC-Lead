@@ -169,3 +169,31 @@ if (invitation) {
     }
   });
 }
+
+for (const group of document.querySelectorAll('[data-data-group]')) {
+  const rows = group.querySelector('[data-data-rows]');
+  const template = group.querySelector('template');
+  const add = group.querySelector('[data-add-data]');
+  const status = group.querySelector('[data-data-status]');
+  const max = Number(group.dataset.maxRows);
+  function refresh() {
+    add.disabled = rows.children.length >= max;
+    status.textContent = add.disabled ? 'Limite de ' + max + ' registros.' : '';
+  }
+  add.addEventListener('click', () => {
+    if (rows.children.length >= max) return;
+    rows.append(template.content.cloneNode(true));
+    refresh();
+    rows.lastElementChild.querySelector('input').focus();
+  });
+  rows.addEventListener('click', event => {
+    const button = event.target.closest('[data-remove-data]');
+    if (!button) return;
+    const row = button.closest('[data-data-row]');
+    const next = row.nextElementSibling ?? row.previousElementSibling;
+    row.remove();
+    refresh();
+    (next?.querySelector('input') ?? add).focus();
+  });
+  refresh();
+}

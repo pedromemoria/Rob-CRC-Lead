@@ -6,9 +6,10 @@ import { ClinicError, clinicKnowledge, trainingFields, uuid } from './clinics.js
 import { DocumentError, extractDocument, uploadBytes } from './documents.js';
 import { minimumPasswordLength, normalizedEmail, validEmail } from './accounts.js';
 import { adminAuth, loginLimit } from './admin-auth.js';
+import { ClinicDataError, clinicDataFromForm, validateClinicData } from './clinic-data.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
-import { accountsView, activationPage, signupPage, adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
+import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
 
 export function admin(config, clinics, store, { accounts, documents, feedback, sessions, decide }) {
   const router = express.Router();
@@ -63,7 +64,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
   });
 
   router.use(auth.protect);
-  const memberRoutes = new Set(['/treinar', '/arquivos', '/arquivos/excluir', '/feedback', '/feedback/excluir', '/simular', '/sair']);
+  const memberRoutes = new Set(['/treinar', '/dados', '/arquivos', '/arquivos/excluir', '/feedback', '/feedback/excluir', '/simular', '/sair']);
   router.use((req, res, next) => {
     if (res.locals.memberClinic && !memberRoutes.has(req.path)) return res.sendStatus(403);
     next();
@@ -113,7 +114,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     next();
   }
 
-  async function renderPanel(req, res, { message = '', status = 200, attempted, tab = req.query.aba } = {}) {
+  async function renderPanel(req, res, { message = '', status = 200, attempted, version, tab = req.query.aba } = {}) {
     const clinic = res.locals.clinic;
     const member = Boolean(res.locals.memberClinic);
     if (member && tab === 'conexao') return res.sendStatus(403);
@@ -133,6 +134,8 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       const lead = active === 'treinamento' ? training({ clinic, attempted, csrf }) :
         active === 'feedback' ? feedbackView({ clinic, attempted, csrf, corrections }) : '';
       body = lead + library({ clinic, csrf, docs, selected: selectedFile, tab: active });
+    } else if (active === 'dados') {
+      body = clinicDataView({ clinic, draft: attempted, csrf, version });
     } else if (active === 'teste') {
       body = (member ? '' : simulationClinicPicker(rows, clinic)) + (clinic ? tester(clinic, csrf) : '');
     } else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
@@ -142,12 +145,31 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
   }
 
   const messages = {
-    clinic: 'Clínica salva.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
+    clinic: 'Clínica salva.', dados: 'Dados e preços salvos.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
     deleted: 'Arquivo excluído.', feedback: 'Feedback salvo.', feedbackDeleted: 'Feedback excluído.'
   };
   router.get('/treinar', selected, (req, res) => renderPanel(req, res, {
     message: Object.hasOwn(messages, req.query.salvo) ? messages[req.query.salvo] : ''
   }));
+  const dataForm = express.urlencoded({ extended: false, limit: '192kb', parameterLimit: 220, inflate: false });
+  router.post('/dados', dataForm, protect, selected, requireClinic, async (req, res) => {
+    const clinic = res.locals.clinic;
+    const version = req.body?.versao;
+    let draft;
+    try {
+      draft = clinicDataFromForm(req.body ?? {});
+      const data = validateClinicData(draft);
+      if (!await clinics.saveData(clinic.id, version, data)) {
+        return renderPanel(req, res, { tab: 'dados', status: 409, attempted: draft, version,
+          message: 'A clínica foi alterada em outra tela. Copie suas alterações e recarregue antes de salvar.' });
+      }
+    } catch (error) {
+      if (!(error instanceof ClinicDataError)) throw error;
+      return renderPanel(req, res, { tab: 'dados', status: 422, attempted: draft, version, message: error.message });
+    }
+    res.redirect(303, adminUrl(clinic.id, 'dados') + '&salvo=dados');
+  });
+
   router.post('/treinar', form, protect, selected, async (req, res) => {
     const clinic = res.locals.clinic;
     const trainingOnly = clinic && req.query.aba === 'treinamento';
