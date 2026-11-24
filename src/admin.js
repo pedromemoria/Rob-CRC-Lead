@@ -137,7 +137,8 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     } else if (active === 'dados') {
       body = clinicDataView({ clinic, draft: attempted, csrf, version });
     } else if (active === 'teste') {
-      body = (member ? '' : simulationClinicPicker(rows, clinic)) + (clinic ? tester(clinic, csrf) : '');
+      const simulationClinic = req.query.modo === 'rapido' ? null : clinic;
+      body = tester(simulationClinic, csrf) + (member ? '' : simulationClinicPicker(rows, simulationClinic));
     } else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
     res.status(status).type('html').send(layout({
       clinics: rows, current: clinic, active, csrf, member, content: notice(message, status >= 400) + body
@@ -242,18 +243,33 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     res.redirect(303, adminUrl(clinicId, fileTab(req)) + '&salvo=deleted');
   });
 
-  router.post('/simular', json, protect, selected, requireClinic, async (req, res) => {
+  function selectSimulationClinic(req, res, next) {
+    if (req.query.modo === 'rapido' && req.query.clinica === undefined) return next();
+    return selected(req, res, next);
+  }
+
+  router.post('/simular', json, protect, selectSimulationClinic, async (req, res) => {
     const { text, withAI } = req.body ?? {};
     if (typeof text !== 'string' || !text.trim() || text.length > 1000 || typeof withAI !== 'boolean') {
       return res.status(422).json({ error: 'Digite uma mensagem com até 1.000 caracteres.' });
     }
     const clinic = res.locals.clinic;
     const history = validHistory(req.body.history);
-    const search = [text, history.at(-1)?.inbound].filter(Boolean).join(' ');
-    const [references, corrections] = await Promise.all([documents.context(clinic.id, search), feedback.list(clinic.id)]);
+    let knowledge;
+    if (clinic) {
+      const search = [text, history.at(-1)?.inbound].filter(Boolean).join(' ');
+      const [references, corrections] = await Promise.all([documents.context(clinic.id, search), feedback.list(clinic.id)]);
+      knowledge = { ...clinicKnowledge(clinic), references, feedback: corrections.map(row => row.conteudo) };
+    } else {
+      if (req.query.modo !== 'rapido') return res.sendStatus(404);
+      const name = typeof req.body.nome_clinica === 'string' ? req.body.nome_clinica.trim() : '';
+      if (!/^[^\u0000-\u001f\u007f]{1,120}$/u.test(name)) {
+        return res.status(422).json({ error: 'Informe o nome da clínica com até 120 caracteres.' });
+      }
+      knowledge = { clinicName: name, files: {}, replies: new Map(), references: [] };
+    }
     try {
-      res.json(await simulate({ clinic, text: text.trim(), history, withAI, decide,
-        knowledge: { ...clinicKnowledge(clinic), references, feedback: corrections.map(row => row.conteudo) } }));
+      res.json(await simulate({ clinic, text: text.trim(), history, withAI, decide, knowledge }));
     } catch (error) {
       if (!withAI) throw error;
       const message = [401, 403, 429].includes(error.status)

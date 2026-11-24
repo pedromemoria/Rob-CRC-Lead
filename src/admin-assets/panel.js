@@ -70,13 +70,15 @@ if (sim) {
   const send = sim.querySelector('.composer button');
   const reset = sim.querySelector('[data-reset]');
   const history = [];
+  const clinicName = sim.elements.nome_clinica;
+  let previousName;
 
   function message(kind, text, detail) {
     log.querySelector('[data-empty]')?.remove();
     const bubble = document.createElement('div');
     bubble.className = 'bubble ' + kind;
     const label = document.createElement('strong');
-    label.textContent = kind === 'lead' ? 'Lead' : 'Robô CRC';
+    label.textContent = kind === 'lead' ? 'Lead' : previousName || 'Robô CRC';
     const content = document.createElement('p');
     content.textContent = text;
     bubble.append(label, content);
@@ -89,7 +91,7 @@ if (sim) {
     log.scrollTop = log.scrollHeight;
   }
 
-  reset.addEventListener('click', () => {
+  function clearConversation() {
     history.length = 0;
     log.replaceChildren();
     const empty = document.createElement('p');
@@ -98,6 +100,9 @@ if (sim) {
     empty.textContent = 'Envie uma mensagem para iniciar o teste.';
     log.append(empty);
     status.textContent = '';
+  }
+  reset.addEventListener('click', () => {
+    clearConversation();
     sim.elements.mensagem.focus();
   });
 
@@ -105,6 +110,15 @@ if (sim) {
     event.preventDefault();
     const text = sim.elements.mensagem.value.trim();
     if (!text || send.disabled) return;
+    const name = clinicName?.value.trim();
+    if (clinicName && !name) {
+      status.textContent = 'Informe o nome da clínica.';
+      clinicName.focus();
+      return;
+    }
+    if (name !== previousName) clearConversation();
+    previousName = name;
+    if (clinicName) clinicName.disabled = true;
     send.disabled = true;
     reset.disabled = true;
     const withAI = !sim.elements.offline.checked;
@@ -112,7 +126,7 @@ if (sim) {
     try {
       const response = await fetch(sim.action, { method: 'POST', headers: {
         'Content-Type': 'application/json', 'X-CSRF-Token': sim.elements._csrf.value
-      }, body: JSON.stringify({ text, withAI, history: history.slice(-12) }) });
+      }, body: JSON.stringify({ text, withAI, history: history.slice(-12), nome_clinica: name }) });
       const answer = await response.json();
       if (!response.ok) throw new Error(answer.error || 'Falha no teste.');
       message('lead', text);
@@ -128,6 +142,7 @@ if (sim) {
     } catch (error) {
       status.textContent = error instanceof SyntaxError ? 'Falha no teste. Tente novamente.' : error.message;
     } finally {
+      if (clinicName) clinicName.disabled = false;
       send.disabled = false;
       reset.disabled = false;
       sim.elements.mensagem.focus();

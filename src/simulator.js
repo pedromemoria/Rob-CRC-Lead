@@ -18,6 +18,9 @@ function offline(text, history, knowledge) {
     answer, score: matches(id.replaceAll('_', ' ') + ' ' + answer, query)
   })).sort((a, b) => b.score - a.score);
   if (ranked[0]?.score > 0) return { kind: 'responder', text: ranked[0].answer };
+  if (knowledge.clinicName && /\b(?:quanto custa|precos?|valores?|endereco|horarios?|convenios?|telefone)\b/.test(normalized)) {
+    return { kind: 'responder', text: replies.sem_informacao, offer: true };
+  }
   return { kind: 'responder', text: replies.convidar, offer: true };
 }
 
@@ -31,15 +34,26 @@ export function validHistory(history) {
 
 export async function simulate({ clinic, text, history, withAI, knowledge, decide }) {
   const result = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
+  const quick = !clinic;
+  let answer = result.text;
+  if (quick && result.kind === 'responder') {
+    if (answer === replies.avaliacao) answer = 'Entendo sua dúvida. A equipe pode avaliar seu caso em uma consulta. Quer simular o agendamento?';
+    if (answer === replies.sem_informacao) answer = 'Essa informação ainda não está disponível. Quer simular o agendamento?';
+    if (answer === replies.convidar) {
+      answer = /^(?:oi|ola|bom dia|boa tarde|boa noite)[.! ]*$/u.test(normalize(text))
+        ? 'Oi! Como posso ajudar?' : 'Quer simular o agendamento de uma consulta?';
+    }
+  }
   const reply = result.kind === 'qualificar_agendamento'
-    ? 'Perfeito! Escolha o melhor horário por aqui:\n' + clinic.agendamento_url
+    ? (quick ? 'Sua intenção de agendar foi identificada. Neste teste, a clínica ainda não tem um link de agenda.'
+      : 'Perfeito! Escolha o melhor horário por aqui:\n' + clinic.agendamento_url)
     : result.kind === 'transbordo_humano'
       ? 'Vou encaminhar sua conversa para a equipe.'
-      : result.text;
-  const action = result.kind === 'qualificar_agendamento' ? 'Mover para agendamento'
+      : answer;
+  const action = result.kind === 'qualificar_agendamento' ? (quick ? 'Agendamento simulado' : 'Mover para agendamento')
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
   return {
-    reply, action, offered: Boolean(result.offer),
+    reply, action, offered: Boolean(result.offer && (!quick || answer !== 'Oi! Como posso ajudar?')),
     sources: knowledge.references.map(item => item.nome),
     feedbackCount: knowledge.feedback?.length ?? 0
   };

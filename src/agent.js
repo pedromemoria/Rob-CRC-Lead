@@ -105,6 +105,7 @@ export function createAgent(config, client = new OpenAI({
         { role: 'system', content: prompt },
         { role: 'user', content: JSON.stringify({
           base_de_conhecimento: files,
+          nome_da_clinica: knowledge.clinicName,
           dados_da_clinica: clinicData ?? {},
           feedbacks_da_clinica: knowledge.feedback ?? [],
           documentos_de_referencia: knowledge.references ?? [],

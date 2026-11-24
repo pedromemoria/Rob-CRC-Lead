@@ -380,10 +380,12 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const feedback = createFeedback(db);
   let modelRefs;
   let modelFeedback;
+  let modelClinicName;
   const server = createApp({ adminToken, ghl: {} }, store, clinics, {
     documents: docs, feedback, decide: async (event, history, knowledge) => {
       modelRefs = knowledge.references;
       modelFeedback = knowledge.feedback;
+      modelClinicName = knowledge.clinicName;
       return { kind: 'responder', text: replies.convidar, offer: true };
     }
   }).listen(0, '127.0.0.1');
@@ -396,10 +398,10 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const entry = await fetch(simulatorPage, { headers });
   assert.equal(entry.status, 200);
   const picker = await entry.text();
-  assert.match(picker, /Clínica para o teste/);
+  assert.match(picker, /Usar uma clínica cadastrada/);
   assert.match(picker, new RegExp(first));
   assert.match(picker, new RegExp(second));
-  assert.doesNotMatch(picker, /data-simulator/);
+  assert.match(picker, /data-simulator.*modo=rapido/);
   const selectedSimulator = await (await fetch(simulatorPage + '&clinica=' + first, { headers })).text();
   assert.match(selectedSimulator, /data-simulator/);
   assert.match(selectedSimulator, /Simulação sem IA/);
@@ -452,6 +454,15 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.equal((await simulation(first, true)).status, 200);
   assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
+  const quickAI = await fetch(base + '/admin/simular?modo=rapido', {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ withAI: true, text: 'Oi', nome_clinica: 'Clínica first' })
+  });
+  assert.equal(quickAI.status, 200);
+  assert.equal((await quickAI.json()).reply, 'Oi! Como posso ajudar?');
+  assert.equal(modelClinicName, 'Clínica first');
+  assert.deepEqual(modelRefs, []);
+  assert.equal(modelFeedback, undefined);
   assert.deepEqual((await (await simulation(second, false)).json()).sources, []);
   assert.equal((await simulation(second, true)).status, 200);
   assert.deepEqual(modelFeedback, []);
@@ -492,8 +503,27 @@ test('credenciais personalizadas substituem o fallback e sessões vencidas são 
   const headers = { Cookie: result.headers.get('set-cookie').split(';')[0] };
   assert.equal((await fetch(base + '/admin/treinar', { headers })).status, 200);
   const emptySimulator = await (await fetch(base + '/admin/treinar?aba=teste', { headers })).text();
-  assert.match(emptySimulator, /Cadastre uma clínica para simular/);
-  assert.doesNotMatch(emptySimulator, /data-simulator/);
+  assert.match(emptySimulator, /Nome da clínica/);
+  assert.match(emptySimulator, /data-simulator.*modo=rapido/);
+  assert.doesNotMatch(emptySimulator, /Carregar simulador/);
+  const csrf = emptySimulator.match(/name="_csrf" value="([^"]+)"/)[1];
+  const quick = (name, text, history) => fetch(base + '/admin/simular?modo=rapido', {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ nome_clinica: name, text, withAI: false, history })
+  });
+  assert.equal((await quick('   ', 'Oi')).status, 422);
+  const start = await (await quick('Clínica de teste', 'Oi')).json();
+  assert.equal(start.reply, 'Oi! Como posso ajudar?');
+  assert.equal(start.offered, false);
+  const pricing = await (await quick('Clínica de teste', 'Quanto custa a consulta?')).json();
+  assert.match(pricing.reply, /informação ainda não está disponível/);
+  assert.equal(pricing.offered, true);
+  const appointment = await (await quick('Clínica de teste', 'Sim', [{
+    inbound: 'Quanto custa a consulta?', outbound: pricing.reply, offered: pricing.offered
+  }])).json();
+  assert.match(appointment.reply, /ainda não tem um link de agenda/);
+  assert.equal(appointment.action, 'Agendamento simulado');
+  assert.deepEqual(appointment.sources, []);
   await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
   assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
 });
@@ -544,6 +574,9 @@ test('cadastro por e-mail requer convite, isola a clínica e revoga a sessão', 
   const memberSimulatorHtml = await memberSimulator.text();
   assert.match(memberSimulatorHtml, /data-simulator/);
   assert.doesNotMatch(memberSimulatorHtml, /Clínica secreta|simulador-clinica/);
+  const quickMember = await (await call('/treinar?aba=teste&modo=rapido', member)).text();
+  assert.match(quickMember, /data-simulator.*modo=rapido/);
+  assert.doesNotMatch(quickMember, /Clínica secreta/);
   assert.equal((await call('/treinar?aba=teste&clinica=' + other, member)).status, 404);
   assert.doesNotMatch(panel, /Clínica secreta|Nova Clínica|Contas e acessos|Copiar Link/);
   const csrf = panel.match(/name="_csrf" value="([^"]+)"/)[1];

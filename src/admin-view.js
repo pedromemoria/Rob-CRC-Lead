@@ -180,24 +180,26 @@ export function clinicDataView({ clinic, draft, csrf, version }) {
 }
 
 export function simulationClinicPicker(clinics, current) {
-  if (!clinics.length) {
-    return '<section class="card">' + heading('Cadastre uma clínica para simular', 'O teste usa o treinamento da clínica selecionada.') +
-      '<a class="button" href="/admin/treinar">+ Nova Clínica</a></section>';
-  }
+  if (!clinics.length) return '';
   const options = clinics.map(clinic => '<option value="' + escape(clinic.id) + '"' +
     (clinic.id === current?.id ? ' selected' : '') + '>' + escape(clinic.nome_clinica) + '</option>').join('');
   return '<section class="card"><form class="simulation-picker" method="get" action="/admin/treinar">' +
-    hidden('aba', 'teste') + '<label for="simulador-clinica">Clínica para o teste</label>' +
+    hidden('aba', 'teste') + '<label for="simulador-clinica">Usar uma clínica cadastrada</label>' +
     '<div class="copy-row"><select id="simulador-clinica" name="clinica" required>' +
     '<option value=""' + (current ? '' : ' selected') + ' disabled>Selecione uma clínica</option>' +
     options + '</select><button>Carregar simulador</button></div></form></section>';
 }
 
 export function tester(clinic, csrf) {
-  return '<section class="card chat">' + heading('Simulador de atendimento', 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.') +
+  const action = clinic ? adminUrl(clinic.id, undefined, 'simular') : '/admin/simular?modo=rapido';
+  return '<section class="card chat">' + heading('Simulador de atendimento', clinic
+    ? 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.'
+    : 'Informe o nome da clínica para testar com respostas genéricas, sem cadastrar CRM ou agenda.') +
+    (clinic ? '<p><a href="/admin/treinar?aba=teste&amp;modo=rapido">Simular só com o nome</a></p>' : '') +
     '<div class="chat-log" data-chat-log role="log" aria-label="Conversa de teste"><p class="muted" data-empty>' +
     'Envie uma mensagem para iniciar o teste.</p></div><form data-simulator action="' +
-    escape(adminUrl(clinic.id, undefined, 'simular')) + '">' + hidden('_csrf', csrf) +
+    escape(action) + '">' + hidden('_csrf', csrf) +
+    (clinic ? '' : input({}, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"')) +
     '<div class="chat-options"><label class="toggle"><input type="checkbox" name="offline" checked> Simulação sem IA</label>' +
     '<button class="secondary" type="button" data-reset>Limpar conversa</button></div>' +
     '<label for="mensagem">Mensagem do lead</label><div class="composer"><textarea id="mensagem" name="mensagem" ' +
