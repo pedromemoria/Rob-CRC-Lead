@@ -1,3 +1,4 @@
+import { minimumPasswordLength } from './accounts.js';
 import { trainingFields } from './clinics.js';
 
 export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -208,9 +209,9 @@ export function signupPage(message = '', requested = false) {
 
 export function activationPage(message = '', token) {
   return accountPage('Ativar conta',
-    '<p class="muted">Defina a senha da sua conta. Use de 16 a 256 caracteres.</p>' + notice(message, true) +
+    '<p class="muted">Defina a senha da sua conta. Use de ' + minimumPasswordLength + ' a 256 caracteres.</p>' + notice(message, true) +
     '<form action="/admin/ativar" method="post" data-activation>' + hidden('convite', typeof token === 'string' && /^[a-f0-9]{64}$/.test(token) ? token : '') +
-    input({}, 'senha', 'Senha', 'password', ' autocomplete="new-password" minlength="16" maxlength="256" required') +
+    input({}, 'senha', 'Senha', 'password', ' autocomplete="new-password" minlength="' + minimumPasswordLength + '" maxlength="256" required') +
     '<button>Ativar conta</button></form><p><a href="/admin/login">Voltar ao login</a></p>');
 }
 

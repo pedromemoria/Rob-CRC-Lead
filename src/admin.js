@@ -4,7 +4,7 @@ import multer from 'multer';
 import { equalSecret } from './webhooks.js';
 import { ClinicError, clinicKnowledge, trainingFields, uuid } from './clinics.js';
 import { DocumentError, extractDocument, uploadBytes } from './documents.js';
-import { normalizedEmail, validEmail } from './accounts.js';
+import { minimumPasswordLength, normalizedEmail, validEmail } from './accounts.js';
 import { adminAuth, loginLimit } from './admin-auth.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
@@ -54,7 +54,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     activations++;
     try {
       if (!await accounts.activate(req.body?.convite, req.body?.senha)) {
-        return res.status(422).type('html').send(activationPage('Abra o link de ativação válido e use uma senha de pelo menos 16 caracteres.', req.body?.convite));
+        return res.status(422).type('html').send(activationPage('Abra o link de ativação válido e use uma senha de pelo menos ' + minimumPasswordLength + ' caracteres.', req.body?.convite));
       }
       res.redirect(303, '/admin/login?ativo=1');
     } finally {

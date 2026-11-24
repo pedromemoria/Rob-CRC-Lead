@@ -8,7 +8,8 @@ export const normalizedEmail = value => typeof value === 'string' ? value.trim()
 export const validEmail = value => value.length <= 254 && emailFormat.test(value);
 const tokenPattern = /^[a-f0-9]{64}$/;
 const hashInvitation = token => createHash('sha256').update(token).digest('hex');
-const validPassword = password => typeof password === 'string' && password.length >= 16 &&
+export const minimumPasswordLength = 8;
+const validPassword = password => typeof password === 'string' && password.length >= minimumPasswordLength &&
   password.length <= 256 && /\S/u.test(password);
 const fakeHash = '0'.repeat(32) + '.' + '0'.repeat(128);
 

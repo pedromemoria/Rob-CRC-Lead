@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { equalSecret } from './webhooks.js';
-import { normalizedEmail } from './accounts.js';
+import { minimumPasswordLength, normalizedEmail } from './accounts.js';
 import { loginPage } from './admin-view.js';
 
 const fallbackEmail = 'admin@robocrc.local';
@@ -31,7 +31,7 @@ export function createSessions(database) {
 export function adminAuth(config, sessions, accounts) {
   const configured = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.adminEmail ?? '') &&
     config.adminEmail.length <= 254 && /\S/.test(config.adminPassword ?? '') &&
-    config.adminPassword.length >= 16 && config.adminPassword.length <= 1024;
+    config.adminPassword.length >= minimumPasswordLength && config.adminPassword.length <= 1024;
   const email = configured ? config.adminEmail.trim().toLowerCase() : fallbackEmail;
   const password = configured ? config.adminPassword : config.adminToken;
   const sign = (purpose, value) => createHmac('sha256', config.adminToken)

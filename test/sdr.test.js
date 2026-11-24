@@ -462,7 +462,7 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
 
 test('credenciais personalizadas substituem o fallback e sessões vencidas são recusadas', async t => {
   const { clinics, db, store } = await fixture(t);
-  const config = { adminToken, adminEmail: 'admin@example.com', adminPassword: 'uma senha extensa de teste', ghl: {} };
+  const config = { adminToken, adminEmail: 'admin@example.com', adminPassword: 'Adm#82L!', ghl: {} };
   const server = createApp(config, store, clinics, { sessions: createSessions(db) }).listen(0, '127.0.0.1');
   t.after(() => new Promise(resolve => server.close(resolve)));
   await once(server, 'listening');
@@ -499,7 +499,7 @@ test('cadastro por e-mail requer convite, isola a clínica e revoga a sessão', 
     body: fields ? new URLSearchParams(fields) : undefined
   });
   const email = 'recepcao@example.com';
-  const senha = 'Senha forte da equipe!';
+  const senha = 'Eqp#82S!';
   assert.equal((await call('/cadastrar', {}, { email: '  RECEPCAO@example.com  ' })).status, 303);
   assert.equal((await call('/cadastrar', {}, { email })).status, 303);
   assert.equal((await call('/login', {}, { email, senha })).status, 401);
@@ -516,7 +516,7 @@ test('cadastro por e-mail requer convite, isola a clínica e revoga a sessão', 
   const token = (await invite.text()).match(/\/admin\/ativar#([a-f0-9]{64})/)[1];
   const stored = (await db.query('SELECT invitation_hash FROM sdr.admin_accounts WHERE id=$1', [id])).rows[0];
   assert.notEqual(stored.invitation_hash, token);
-  assert.equal((await call('/ativar', {}, { convite: token, senha: 'curta' })).status, 422);
+  assert.equal((await call('/ativar', {}, { convite: token, senha: senha.slice(0, -1) })).status, 422);
   assert.equal((await call('/ativar', {}, { convite: token, senha })).status, 303);
   assert.equal((await call('/ativar', {}, { convite: token, senha })).status, 422);
   const session = await call('/login', {}, { email, senha });
