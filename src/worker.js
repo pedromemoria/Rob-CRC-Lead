@@ -2,7 +2,7 @@ import { SlotUnavailable, availableOptions, chosenOption, externalBookingLink, s
 import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
-import { addAcknowledgment, bookingHandoffReply, explicitHandoff, handoffReasons, mentionsOnlineBooking, normalize, wantsAssessment } from './agent.js';
+import { addAcknowledgment, bookingHandoffReply, distinctSentences, explicitHandoff, handoffReasons, mentionsOnlineBooking, normalize, wantsAssessment } from './agent.js';
 import { closingContext, isContactPrompt, mentionsPrice, validSalesReply } from './sales.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
@@ -136,13 +136,14 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     } else if (decide.styleReply) {
       const history = await store.history(job);
       text = job.plan.acknowledgment
-        ? addAcknowledgment(text, job.plan.acknowledgment, history.at(-1)?.outbound)
+        ? addAcknowledgment(text, job.plan.acknowledgment, history)
         : (await decide.styleReply(text, history)).text;
       await store.plan(job, { ...job.plan, deliveryText: text }, 'send');
     }
     await store.startEffect(job);
-    await crm.send(job.event, text);
-    await store.finish(job, text);
+    const outbound = distinctSentences(text);
+    await crm.send(job.event, outbound);
+    await store.finish(job, outbound);
   }
 
   async function processNext(store) {

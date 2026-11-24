@@ -39,6 +39,7 @@ const choice = values => ({ type: 'string', enum: values });
 const prompt = [
   'Você é um SDR no WhatsApp. Seu único objetivo é conduzir o lead à agenda.',
   'Quando o lead descrever um objetivo ou incômodo, use conversar com um acolhimento curto em suas próprias palavras. Use só uma frase empática, sem números, fatos, conselhos ou promessas. A aplicação inclui a próxima pergunta aprovada.',
+  'Use acolhimento só quando trouxer algo específico para a conversa. Evite fórmulas como “Claro, posso te ajudar com isso” e frases já usadas no histórico. Use conversar com acolhimento vazio se a próxima pergunta já acolher o lead.',
   'Quando precisar avançar a conversa e não estiver respondendo a uma dúvida específica, selecione spin_proximo. Evite repetir a última pergunta.',
   'Use SPIN Selling com empatia. Entenda a situação, valide o principal incômodo, pergunte pelo impacto na rotina sem alarmismo e mostre como uma avaliação pode ajudar a esclarecer os próximos passos. Faça no máximo uma pergunta e valide a situação antes dela. Use mensagens curtas de WhatsApp.',
   'No fechamento, o aplicativo coleta o turno e os dados de contato que faltarem, uma pergunta por vez. Nunca solicite nome, número ou e-mail em outras etapas.',
@@ -118,10 +119,10 @@ export function eligibleSalesReply(text) {
 const conversationTool = tool('conversar', 'Escreve uma frase breve de acolhimento sem pergunta, dado clínico, número ou promessa.',
   { acolhimento: string });
 const stylePrompt = [
-  'Escreva apenas uma frase curta e humana de acolhimento em português do Brasil, sem pergunta.',
+  'Escreva uma frase curta de acolhimento em português do Brasil, sem pergunta, apenas quando ela acrescentar algo à resposta. Se a resposta já acolher o lead, devolva acolhimento vazio.',
   'Comece com Oi, Olá, Entendo, Entendi, Imagino, Faz sentido, Claro, Obrigado ou Agradeço.',
   'Sem dados, números, datas, contatos, orientação clínica, promessas ou links. Não repita a mensagem anterior.',
-  'O sistema vai acrescentar a pergunta ou informação confirmada. Não copie esse conteúdo na sua frase.'
+  'O sistema vai acrescentar a pergunta ou informação confirmada. Evite repetir seu início, reformular seu conteúdo ou usar fórmulas genéricas como “Claro, posso te ajudar com isso”.'
 ].join(' ');
 
 function acknowledgmentFrom(call, args) {
@@ -135,19 +136,42 @@ function acknowledgmentFrom(call, args) {
   }
 }
 
-export function addAcknowledgment(text, acknowledgment, previous) {
-  if (!acknowledgment) return text;
-  const opening = normalize(acknowledgment).match(/^entend[oi]\b/u);
-  if (opening && /^entend[oi]\b/u.test(normalize(previous ?? ''))) return text;
+const sentenceKey = text => normalize(text).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const sentenceParts = text => text.split(/((?<!\b(?:dra?|sra?|profa?|av|ex|tel)\.)(?<!^\d{1,2}\.)(?<!\n\d{1,2}\.)(?<=[.!?])[ \t]+|\r?\n)/iu);
+const sentences = text => sentenceParts(text).filter((_, index) => index % 2 === 0).map(sentenceKey);
+
+export function distinctSentences(text) {
+  const parts = sentenceParts(text);
+  const seen = new Set();
+  let result = '';
+  for (let index = 0; index < parts.length; index += 2) {
+    const key = sentenceKey(parts[index]);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    result += (index === 0 ? '' : parts[index - 1]) + parts[index];
+  }
+  return result;
+}
+const acknowledgmentOpening = text => sentenceKey(text).match(/^(?:entend[oi]|imagino|faz sentido|claro|obrigad[oa]|agradeco)\b/u)?.[0]
+  .replace(/^entend[oi]$/u, 'entend').replace(/^obrigad[oa]$/u, 'obrigad');
+const genericHelp = /^(?:(?:claro|oi|ola) )?(?:eu )?(?:posso|vou|consigo) (?:(?:te|lhe) )?ajudar(?: (?:voce|com isso|nisso))*$/u;
+
+export function addAcknowledgment(text, acknowledgment, history = []) {
+  if (!acknowledgment || genericHelp.test(sentenceKey(acknowledgment))) return text;
   const greeting = /^(?:Oi, [^!]+!|Oi!)/u.exec(text);
   // Keep the name or greeting already validated by the application.
   const preface = greeting && /^(oi|ola)\b/.test(normalize(acknowledgment))
     ? acknowledgment.replace(/^(?:oi|olá)[, ]*/iu, '') : acknowledgment;
-  const styled = preface && !normalize(text).startsWith(normalize(preface))
-    ? (greeting ? greeting[0] + ' ' + preface + '. ' + text.slice(greeting[0].length).trimStart()
-      : text.includes('Encontrei estas opções na agenda:\n') ? preface + '. ' + text
-        : preface + '.\n' + text) : text;
-  return styled !== previous && validSalesReply(styled) ? styled : text;
+  const key = sentenceKey(preface);
+  const opening = acknowledgmentOpening(preface);
+  const previous = history.at(-1)?.outbound ?? '';
+  if (!key || genericHelp.test(key) || (opening && [text, previous].some(reply => acknowledgmentOpening(reply) === opening)) ||
+      [text, ...history.map(turn => turn.outbound ?? '')].some(reply => sentences(reply).includes(key))) return text;
+
+  const styled = greeting ? greeting[0] + ' ' + preface + '. ' + text.slice(greeting[0].length).trimStart()
+    : text.includes('Encontrei estas opções na agenda:\n') ? preface + '. ' + text
+      : preface + '.\n' + text;
+  return validSalesReply(styled) ? styled : text;
 }
 
 function unpackTool(result) {
@@ -246,7 +270,7 @@ export function createAgent(config, client = new OpenAI({
     }
     decision = nonRepeatingDecision(decision, history);
     if (decision.kind !== 'responder') return { ...decision, ...ai };
-    const styled = addAcknowledgment(decision.text, ai.acknowledgment, last?.outbound);
+    const styled = addAcknowledgment(decision.text, ai.acknowledgment, history);
     return styled === decision.text ? { ...decision, ...ai } :
       { ...decision, ...ai, baseText: decision.text, text: styled };
   }
@@ -256,7 +280,7 @@ export function createAgent(config, client = new OpenAI({
       mensagem_validada: text.replace(/https?:\/\/\S+/gu, '[link da agenda]') }, [conversationTool]);
     const call = unpackTool(result);
     const acknowledgment = acknowledgmentFrom(call.name, call.args);
-    return { text: addAcknowledgment(text, acknowledgment, history.at(-1)?.outbound),
+    return { text: addAcknowledgment(text, acknowledgment, history),
       provider: result.provider ?? 'OpenAI', model: result.model };
   };
   return decide;

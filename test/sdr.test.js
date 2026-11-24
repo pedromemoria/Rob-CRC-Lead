@@ -19,7 +19,7 @@ import { createWorker } from '../src/worker.js';
 import { createAIProvider, providerFailureMessage } from '../src/ai-provider.js';
 import { bookingCallbackToken } from '../src/booking.js';
 import { salesReplies } from '../src/sales.js';
-import { bookingHandoffReply, bookingInterest, createAgent, replies } from '../src/agent.js';
+import { addAcknowledgment, bookingHandoffReply, bookingInterest, createAgent, distinctSentences, replies } from '../src/agent.js';
 import { simulate, validHistory } from '../src/simulator.js';
 import { createApp } from '../src/server.js';
 import { createCrms, OpportunityError } from '../src/crm.js';
@@ -937,7 +937,7 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
     assert.equal(body.toolConfig.functionCallingConfig.mode, 'ANY');
     assert.deepEqual(body.generationConfig, { maxOutputTokens: 1500 });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [
-      { functionCall: { name: 'conversar', args: { acolhimento: 'Entendo que encontrar o atendimento certo seja importante para você' } } }
+      { functionCall: { name: 'conversar', args: { acolhimento: 'Imagino que encontrar o atendimento certo seja importante para você' } } }
     ] } }] }), { status: responseStatus });
   };
   const fallback = { chat: { completions: { async create() {
@@ -1082,15 +1082,54 @@ test('desejo agendar aciona a IA e mantém a pergunta de fechamento validada', a
   let calls = 0;
   const decide = createAgent({ model: 'test' }, { chat: { completions: { async create() {
     calls++;
-    return { ...modelResult('conversar', { acolhimento: 'Claro, que bom conversar com você' }), provider: 'Gemini' };
+    return { ...modelResult('conversar', { acolhimento: 'Claro, posso te ajudar com isso' }), provider: 'Gemini' };
   } } } });
   for (const withAI of [true, false]) {
     const message = await simulate({ text: 'DESEJO AGENDAR UMA CONSULTA', withAI, history: [], knowledge, decide });
-    assert.match(message.reply, /especialidade ou objetivo/);
+    assert.equal(message.reply, 'Claro, posso ajudar a agendar. Qual especialidade ou objetivo você tem em mente?');
     assert.equal(message.provider, withAI ? 'Gemini' : undefined);
   }
   assert.equal(calls, 1);
   assert.equal(bookingInterest('Não desejo agendar uma consulta', []), false);
+});
+
+test('acolhimento evita repetir frases da resposta ou de mensagens anteriores', async () => {
+  const acknowledgment = 'Imagino como é importante encontrar o atendimento certo';
+  const followUp = 'Combinado. Prefere que a equipe verifique horários de manhã ou à tarde?';
+  const history = [
+    { outbound: 'Oi! IMAGINO como é importante encontrar o atendimento certo. Como posso ajudar?' },
+    { outbound: 'Tudo bem. Que tipo de consulta você procura?' }
+  ];
+  assert.equal(addAcknowledgment(followUp, acknowledgment, history), followUp);
+  assert.equal(addAcknowledgment('Claro, posso ajudar a agendar. Qual especialidade você procura?',
+    'Claro, que bom poder orientar você'), 'Claro, posso ajudar a agendar. Qual especialidade você procura?');
+  assert.equal(addAcknowledgment(followUp, acknowledgment), acknowledgment + '.\n' + followUp);
+
+  const decide = createAgent({ model: 'test' }, { chat: { completions: { async create() {
+    return modelResult('conversar', { acolhimento: acknowledgment });
+  } } } });
+  const reply = await decide.styleReply('Sua avaliação está confirmada.', history);
+  assert.equal(reply.text, 'Sua avaliação está confirmada.');
+});
+
+test('simulador remove qualquer frase duplicada dentro de uma resposta', async () => {
+  const duplicated = 'A Dra. Silva atende de manhã. A Dra. Silva atende de manhã.\n' +
+    'A Dra. Melo atende à tarde.\nA DRA. MELO ATENDE À TARDE!\nQual turno funciona melhor?';
+  const expected = 'A Dra. Silva atende de manhã.\nA Dra. Melo atende à tarde.\nQual turno funciona melhor?';
+  assert.equal(distinctSentences(duplicated), expected);
+  assert.equal(distinctSentences('A recepção abre às 8. A recepção abre às 8.'), 'A recepção abre às 8.');
+
+  const withAgenda = 'Encontrei estas opções na agenda:\n1. quarta às 10h\n2. sexta às 10h\nQual opção você prefere?';
+  assert.equal(distinctSentences(withAgenda), withAgenda);
+
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'frase-duplicada')), references: [] };
+  const decide = async () => ({ kind: 'responder', text: duplicated });
+  const result = await simulate({ text: 'Quais são os horários?', history: [], knowledge, withAI: true, decide });
+  assert.equal(result.reply, expected);
+
+  knowledge.replies.set('recepcao', 'A recepção abre às oito. A recepção abre às oito.');
+  const offline = await simulate({ text: 'Recepção', history: [], knowledge, withAI: false });
+  assert.equal(offline.reply, 'A recepção abre às oito.');
 });
 
 test('IA participa do agendamento inteiro e preserva o horário e os dados privados', async () => {

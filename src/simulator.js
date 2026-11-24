@@ -1,4 +1,4 @@
-import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, addAcknowledgment, handoffReasons, bookingHandoffReply, replies } from './agent.js';
+import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, addAcknowledgment, distinctSentences, handoffReasons, bookingHandoffReply, replies } from './agent.js';
 import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
 import { consultativeDecision, consultativeFallback, nonRepeatingDecision } from './sales.js';
 import { availableOptions, chosenOption, slotMessage } from './booking.js';
@@ -39,7 +39,12 @@ export function validHistory(history) {
   })) : [];
 }
 
-export async function simulate({ text, history, withAI, knowledge, decide, booking = {} }) {
+export async function simulate(options) {
+  const result = await simulationReply(options);
+  return { ...result, reply: distinctSentences(result.reply) };
+}
+
+async function simulationReply({ text, history, withAI, knowledge, decide, booking = {} }) {
   const pending = booking.calendarId && history.at(-1)?.agenda_ofertada;
   const lead = normalize(text);
   if (pending?.length && !explicitHandoff(lead) && !wantsAssessment(lead) &&
@@ -54,7 +59,7 @@ export async function simulate({ text, history, withAI, knowledge, decide, booki
   }
   const decision = withAI ? await decide({ text }, history, { ...knowledge, simulator: true }) : offline(text, history, knowledge);
   const result = withAI ? decision : nonRepeatingDecision(decision, history);
-  const styled = text => addAcknowledgment(text, decision.acknowledgment, history.at(-1)?.outbound);
+  const styled = text => addAcknowledgment(text, decision.acknowledgment, history);
   const info = {
     provider: decision.provider,
     model: decision.model,
