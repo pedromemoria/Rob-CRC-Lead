@@ -16,7 +16,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
 import { createWorker } from '../src/worker.js';
+import { salesReplies } from '../src/sales.js';
 import { bookingHandoffReply, createAgent, replies } from '../src/agent.js';
+import { simulate } from '../src/simulator.js';
 import { createApp } from '../src/server.js';
 import { createCrms, OpportunityError } from '../src/crm.js';
 
@@ -80,32 +82,35 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   } } } };
   const decide = createAgent({ model: 'gpt-4o' }, mock);
   result = modelResult('responder', { resposta_id: 'https://malicioso.invalid' });
-  assert.equal((await decide({ text: 'Oi' }, [], knowledge)).text, replies.convidar);
-
-  result = modelResult('qualificar_agendamento', { trecho: 'quero agendar' });
-  assert.equal((await decide({ text: 'Eu quero agendar' }, [], knowledge)).kind, 'qualificar_agendamento');
+  assert.match((await decide({ text: 'Oi', leadName: 'Ana Pereira' }, [], knowledge)).text, /Oi, Ana!/);
+  assert.equal((await decide({ text: 'Eu quero agendar' }, [], knowledge)).text, salesReplies.turno);
   assert.equal((await decide({ text: 'Eu não quero agendar' }, [], knowledge)).kind, 'responder');
-  assert.equal((await decide({ text: 'Oi' }, [], knowledge)).kind, 'responder');
-  result = modelResult('qualificar_agendamento', { trecho: 'Sim' });
   assert.equal((await decide({ text: 'Sim' }, [], knowledge)).kind, 'responder');
-  assert.equal((await decide({ text: 'Sim' }, [{ offered: 1 }], knowledge)).kind, 'qualificar_agendamento');
-
-  result = modelResult('responder', { resposta_id: 'acolher' });
+  assert.equal((await decide({ text: 'Sim' }, [{ offered: true }], knowledge)).text, salesReplies.turno);
+  const offered = [{ outbound: salesReplies.turno, offered: true }];
+  assert.deepEqual(await decide({ text: 'Prefiro à tarde' }, offered, knowledge),
+    { kind: 'qualificar_agendamento', turn: 'tarde' });
   assert.equal((await decide({ text: 'Pode diagnosticar o meu caso?' }, [], knowledge)).text, replies.avaliacao);
   assert.equal((await decide({ text: 'Quero falar com um humano' }, [], knowledge)).kind, 'transbordo_humano');
   assert.equal((await decide({ text: 'Pare de me enviar mensagens' }, [], knowledge)).reason, 'descadastro');
-  assert.equal(requests, 7);
+  assert.equal(requests, 2);
 
   clinic.faq = '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n';
   knowledge = clinicKnowledge(clinic);
   result = modelResult('responder', { resposta_id: 'valor' });
   const feedback = ['Priorize o preço publicado quando houver uma pergunta direta.'];
-  assert.equal((await decide({ text: 'Qual o preço?' }, [], { ...knowledge, feedback })).text, 'A consulta custa R$ 120,00.');
+  assert.equal((await decide({ text: 'Qual o preço?' }, [], { ...knowledge, feedback })).text, salesReplies.preco_contexto);
+  assert.equal((await decide({ text: 'Insisto, qual o preço?' }, [], knowledge)).text, salesReplies.sem_preco);
+  await decide({ text: 'A consulta é presencial?' }, [], { ...knowledge, feedback });
   assert.deepEqual(modelContext.feedbacks_da_clinica, feedback);
+  assert.equal(modelContext.respostas_disponiveis.valor, undefined);
   knowledge.replies.set('convite_antigo', 'Quer receber o link para escolher um horário?');
+  knowledge.replies.set('questionario', 'Entendi. Qual seu nome? E seu telefone?');
   result = modelResult('responder', { resposta_id: 'convite_antigo' });
-  assert.equal((await decide({ text: 'Como faço para agendar?' }, [], knowledge)).text, replies.convidar);
+  const natural = await decide({ text: 'Queria saber sobre a consulta' }, [], knowledge);
+  assert.match(natural.text, /Como posso ajudar/);
   assert.equal(modelContext.respostas_disponiveis.convite_antigo, undefined);
+  assert.equal(modelContext.respostas_disponiveis.questionario, undefined);
   assert.equal(safeReply('Acesse teste.com'), false);
   assert.equal(safeReply('Acesse 127.0.0.1'), false);
   assert.equal(safeReply('Acesse ｈｔｔｐ．com'), false);
@@ -458,18 +463,18 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.equal(noAI.reply, 'Atendemos aos sábados.');
   assert.deepEqual(noAI.sources, ['atendimento.txt']);
   assert.equal(noAI.feedbackCount, 1);
-  const appointment = await (await simulation(first, false, 'Eu quero agendar')).json();
+  const appointment = await (await simulation(first, false, 'Eu quero agendar de manhã')).json();
   assert.equal(appointment.reply, bookingHandoffReply);
-  assert.equal(appointment.action, 'Encaminhar para agendamento no ERP');
+  assert.match(appointment.action, /^Encaminhar para agendamento no ERP · /);
   assert.equal((await simulation(first, true)).status, 200);
   assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
   const quickAI = await fetch(base + '/admin/simular?modo=rapido', {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-    body: JSON.stringify({ withAI: true, text: 'Oi', nome_clinica: 'Clínica first' })
+    body: JSON.stringify({ withAI: true, text: 'A consulta é presencial?', nome_clinica: 'Clínica first' })
   });
   assert.equal(quickAI.status, 200);
-  assert.equal((await quickAI.json()).reply, 'Oi! Como posso ajudar?');
+  assert.equal((await quickAI.json()).reply, replies.convidar);
   assert.equal(modelClinicName, 'Clínica first');
   assert.deepEqual(modelRefs, []);
   assert.equal(modelFeedback, undefined);
@@ -526,13 +531,15 @@ test('credenciais personalizadas substituem o fallback e sessões vencidas são 
   assert.equal(start.reply, 'Oi! Como posso ajudar?');
   assert.equal(start.offered, false);
   const pricing = await (await quick('Clínica de teste', 'Quanto custa a consulta?')).json();
-  assert.match(pricing.reply, /informação ainda não está disponível/);
-  assert.equal(pricing.offered, true);
-  const appointment = await (await quick('Clínica de teste', 'Sim', [{
-    inbound: 'Quanto custa a consulta?', outbound: pricing.reply, offered: pricing.offered
+  assert.equal(pricing.reply, salesReplies.preco_contexto);
+  assert.equal(pricing.offered, false);
+  const turn = await (await quick('Clínica de teste', 'Quero agendar')).json();
+  assert.equal(turn.reply, salesReplies.turno);
+  const appointment = await (await quick('Clínica de teste', 'À tarde', [{
+    inbound: 'Quero agendar', outbound: turn.reply, offered: turn.offered
   }])).json();
   assert.equal(appointment.reply, bookingHandoffReply);
-  assert.equal(appointment.action, 'Encaminhar para agendamento no ERP');
+  assert.match(appointment.action, /^Encaminhar para agendamento no ERP · /);
   assert.deepEqual(appointment.sources, []);
   await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
   assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
@@ -651,18 +658,21 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
     body: JSON.stringify({ text, withAI })
   })).json();
-  assert.equal((await sim(first, 'Quanto custa a consulta inicial?')).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
-  assert.equal((await sim(first, 'Quanto custa a consulta?')).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
-  assert.equal((await sim(first, 'Quanto custa a consulta inicial?', true)).reply, 'Valor de Consulta inicial: R$ 150 a R$ 200');
+  assert.equal((await sim(first, 'Quanto custa a consulta inicial?')).reply, salesReplies.preco_contexto);
+  const authorizedPrice = 'Entendo que o valor seja importante. Consulta inicial: R$ 150 a R$ 200. O cadastro informa: Consulta presencial.';
+  assert.equal((await sim(first, 'Insisto, quanto custa a consulta inicial?')).reply, authorizedPrice);
+  assert.equal((await sim(first, 'Insisto, quanto custa a consulta inicial?', true)).reply, authorizedPrice);
+  await sim(first, 'Pode mandar o Google Maps?', true);
   assert.equal(modelContext.dados_da_clinica.contato.maps_url, values.maps_url);
   assert.deepEqual(modelContext.feedbacks_da_clinica, ['Orientação da primeira clínica']);
   assert.equal((await sim(first, 'Qual o WhatsApp da recepção?')).reply, 'Telefone ou WhatsApp da recepção: (85) 98888-1234');
   assert.equal((await sim(first, 'Qual o CRM da Dra. Ana Silva?')).reply, 'Profissional: Dra. Ana Silva · Urologia · CRM-CE 12345');
   assert.equal((await sim(first, 'Pode mandar o Google Maps?')).reply, 'Endereço: Rua das Flores, 120');
-  assert.doesNotMatch((await sim(second, 'Quanto custa a consulta inicial?', true)).reply, /150|200/);
+  assert.doesNotMatch((await sim(second, 'Insisto, quanto custa a consulta inicial?', true)).reply, /150|200/);
+  await sim(second, 'Pode mandar o Google Maps?', true);
   assert.deepEqual(modelContext.dados_da_clinica, {});
   selected = 'cadastro_servico_0_valor';
-  assert.equal((await sim(first, 'Quanto custa o implante?', true)).reply, replies.sem_informacao);
+  assert.equal((await sim(first, 'Insisto, quanto custa o implante?', true)).reply, salesReplies.sem_preco);
   const integration = await clinics.integration(first);
   assert.equal(integration.knowledge.clinicData.contato.endereco, values.endereco);
   const sent = [];
@@ -670,17 +680,17 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
   const worker = createWorker({ store, documents: docs, feedback: notes, decide, integrationFor: clinics.integration,
     crmFor: () => ({ ghl: { send: async (event, text) => sent.push(text) } })
   });
-  await store.enqueue([event('structured-data', first, 'first-data', 'Quanto custa a consulta inicial?')]);
+  await store.enqueue([event('structured-data', first, 'first-data', 'Insisto, quanto custa a consulta inicial?')]);
   await worker.tick();
-  assert.deepEqual(sent, ['Valor de Consulta inicial: R$ 150 a R$ 200']);
+  assert.deepEqual(sent, [authorizedPrice]);
 
-  await store.enqueue([event('structured-retry', first, 'first-data', 'Quanto custa a consulta inicial?')]);
+  await store.enqueue([event('structured-retry', first, 'first-data', 'Insisto, quanto custa a consulta inicial?')]);
   const retry = await store.claim();
-  await store.plan(retry, { kind: 'responder', text: 'Valor de Consulta inicial: R$ 150 a R$ 200' }, 'send');
+  await store.plan(retry, { kind: 'responder', text: authorizedPrice }, 'send');
   await store.fail(retry, 'queued', 'retry');
   assert.equal((await save({ versao: String((await clinics.get(first)).versao), serv_valor: 'R$ 220' })).status, 303);
   await worker.tick();
-  assert.deepEqual(sent, ['Valor de Consulta inicial: R$ 150 a R$ 200', 'Valor de Consulta inicial: R$ 220']);
+  assert.deepEqual(sent, [authorizedPrice, authorizedPrice.replace('R$ 150 a R$ 200', 'R$ 220')]);
 });
 
 test('clínica criada só com nome pode ser treinada e simulada antes de conectar o CRM', async t => {
@@ -735,7 +745,7 @@ test('clínica criada só com nome pode ser treinada e simulada antes de conecta
   assert.match((await sim('Tem estacionamento?', true)).reply, /Estacionamento gratuito/);
   assert.equal(modelContext.dados_da_clinica.observacoes, notes);
   assert.equal(modelContext.base_de_conhecimento['regras_negocio.md'], 'Acolha com cuidado.');
-  assert.equal((await sim('Quero agendar')).reply, bookingHandoffReply);
+  assert.equal((await sim('Quero agendar de manhã')).reply, bookingHandoffReply);
   const connectionUrl = view + '&aba=conexao';
   const connection = await (await fetch(base + connectionUrl, { headers })).text();
   assert.doesNotMatch(connection, /name="agendamento_url"|nome e agenda|link de agendamento/i);
@@ -801,7 +811,7 @@ test('retentativa de agendamento mantém a tarefa única e nunca envia o link an
 
   await store.enqueue([{ ...event('erp-sem-card', id, 'erp'), leadId: '101' }]);
   const withAmbiguity = createWorker({
-    store, integrationFor: clinics.integration, decide: async () => ({ kind: 'qualificar_agendamento' }),
+    store, integrationFor: clinics.integration, decide: async () => ({ kind: 'qualificar_agendamento', turn: 'manhã' }),
     crmFor: () => ({ ghl: {
       qualify: async () => { throw new OpportunityError(); },
       handoff: async (input, reason) => actions.push(reason),
@@ -809,6 +819,30 @@ test('retentativa de agendamento mantém a tarefa única e nunca envia o link an
     } })
   });
   await withAmbiguity.tick();
-  assert.match(actions[1], /agendamento no ERP.*Confira o card/);
+  assert.match(actions[1], /agendamento no ERP.*manhã.*Confira o card/);
   assert.deepEqual(await store.pending(id), []);
+});
+
+test('simulador conduz as etapas do SPIN e respeita objeções antes do encaminhamento', async () => {
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'spin')), references: [] };
+  const history = [];
+  const send = async text => {
+    const reply = await simulate({ text, history, withAI: false, knowledge });
+    assert.ok((reply.reply.match(/\?/g)?.length ?? 0) <= 1);
+    history.push({ inbound: text, outbound: reply.reply, offered: reply.offered });
+    return reply;
+  };
+
+  assert.match((await send('Oi')).reply, /Como posso ajudar/);
+  assert.equal((await send('Quero saber mais sobre o atendimento.')).reply, salesReplies.situacao);
+  assert.equal((await send('Para mim.')).reply, salesReplies.problema);
+  assert.equal((await send('Isso tem me incomodado.')).reply, salesReplies.impacto);
+  assert.equal((await send('Tem atrapalhado minha rotina.')).reply, salesReplies.necessidade);
+  assert.equal((await send('Vou pensar e conversar com minha esposa.')).reply, salesReplies.pensar);
+  assert.equal((await send('Quero agendar.')).reply, salesReplies.turno);
+  assert.equal((await send('Não posso de manhã, prefiro à tarde.')).action, 'Encaminhar para agendamento no ERP · tarde');
+
+  const withObjection = await simulate({ text: 'Não tenho tempo agora', history: [], withAI: false, knowledge });
+  assert.equal(withObjection.reply, salesReplies.tempo);
+  assert.doesNotMatch(withObjection.reply, /minutos|disponibilidade|pré-reserv/i);
 });

@@ -2,6 +2,7 @@ import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
 import { bookingHandoffReply, handoffReasons, mentionsOnlineBooking } from './agent.js';
+import { mentionsPrice, qualifiedTurnContext, validSalesReply } from './sales.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
 function errorStatus(error) {
@@ -20,7 +21,8 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     if (integration.provider !== job.event.provider) throw new ClinicError('O CRM do evento não corresponde à clínica.');
     const crm = crmFor(integration)[job.event.provider];
     const officialReplies = new Set(clinicFacts(integration.knowledge.clinicData).values());
-    const allowed = text => !mentionsOnlineBooking(text) && (safeReply(text) || officialReplies.has(text));
+    const allowed = text => validSalesReply(text) && !mentionsOnlineBooking(text) &&
+      (officialReplies.has(text) || (!mentionsPrice(text) && safeReply(text)));
     const needsDecision = !job.plan || (job.plan.kind === 'responder' && !allowed(job.plan.text));
     if (needsDecision) {
       const history = await store.history(job);
@@ -52,7 +54,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     }
     if (job.step === 'handoff') {
       const booking = job.plan.kind === 'qualificar_agendamento';
-      let reason = handoffReasons[booking ? 'agendamento' : job.plan.reason];
+      let reason = handoffReasons[booking ? 'agendamento' : job.plan.reason] + qualifiedTurnContext(job.plan.turn);
       if (job.plan.faltaOportunidade) reason += ' ' + handoffReasons.oportunidade;
       await store.startEffect(job);
       await crm.handoff(job.event, reason, job.id.slice(0, 16));

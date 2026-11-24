@@ -1,5 +1,6 @@
 import { timingSafeEqual, verify } from 'node:crypto';
 import express from 'express';
+import { firstName } from './sales.js';
 import { hashWebhook } from './clinics.js';
 
 const id = /^[A-Za-z0-9_-]{1,128}$/;
@@ -35,7 +36,7 @@ export function kommoEvents(body, config) {
   ).map(m => ({
     provider: 'kommo', account: config.accountId,
     leadId: String(m.entity_id ?? m.element_id), eventId: String(m.id),
-    conversationId: String(m.talk_id), text: messageText(m.text)
+    conversationId: String(m.talk_id), leadName: firstName(m.author.name), text: messageText(m.text)
   }));
 }
 
@@ -56,6 +57,7 @@ export function ghlEvents(body, config) {
     provider: 'ghl', account: config.locationId, leadId: String(body.contactId),
     conversationId: String(body.conversationId), eventId: String(body.messageId),
     channel, providerId: channel === 'Custom' ? String(body.conversationProviderId) : undefined,
+    leadName: firstName(body.contact?.firstName ?? body.firstName ?? body.contactName),
     text: messageText(body.body)
   }];
 }

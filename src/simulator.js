@@ -1,5 +1,6 @@
-import { normalize, explicitHandoff, wantsAssessment, allowBooking, handoffReasons, bookingHandoffReply, mentionsOnlineBooking, replies } from './agent.js';
+import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, handoffReasons, bookingHandoffReply, replies } from './agent.js';
 import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
+import { consultativeDecision, consultativeFallback } from './sales.js';
 import { terms } from './documents.js';
 
 const words = text => terms(normalize(text));
@@ -10,20 +11,21 @@ function offline(text, history, knowledge) {
   const reason = explicitHandoff(normalized);
   if (reason) return { kind: 'transbordo_humano', reason };
   if (wantsAssessment(normalized)) return { kind: 'responder', text: replies.avaliacao, offer: true };
-  if (allowBooking(text, text, Boolean(history.at(-1)?.offered))) return { kind: 'qualificar_agendamento' };
+  const consultation = consultativeDecision(text, history, knowledge, bookingInterest(text, history));
+  if (consultation) return consultation;
   const facts = clinicFacts(knowledge.clinicData);
   const fact = matchClinicFact(knowledge.clinicData, facts, text, history.at(-1)?.inbound) ??
     matchClinicObservation(knowledge.clinicData, facts, text);
-  if (fact && !mentionsOnlineBooking(fact)) return { kind: 'responder', text: fact };
+  if (eligibleSalesReply(fact)) return { kind: 'responder', text: fact };
   const query = words(text);
   const ranked = Array.from(knowledge.replies, ([id, answer]) => ({
     answer, score: matches(id.replaceAll('_', ' ') + ' ' + answer, query)
-  })).filter(({ answer }) => !mentionsOnlineBooking(answer)).sort((a, b) => b.score - a.score);
+  })).filter(({ answer }) => eligibleSalesReply(answer)).sort((a, b) => b.score - a.score);
   if (ranked[0]?.score > 0) return { kind: 'responder', text: ranked[0].answer };
   if (knowledge.clinicName && /\b(?:quanto custa|precos?|valores?|endereco|horarios?|convenios?|telefone)\b/.test(normalized)) {
     return { kind: 'responder', text: replies.sem_informacao, offer: true };
   }
-  return { kind: 'responder', text: replies.convidar, offer: true };
+  return consultativeFallback(history);
 }
 
 export function validHistory(history) {
@@ -36,18 +38,12 @@ export function validHistory(history) {
 
 export async function simulate({ text, history, withAI, knowledge, decide }) {
   const result = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
-  let answer = result.text;
-  if (result.kind === 'responder' && mentionsOnlineBooking(answer)) answer = replies.convidar;
-  if (result.kind === 'responder' && answer === replies.convidar &&
-      /^(?:oi|ola|bom dia|boa tarde|boa noite)[.! ]*$/u.test(normalize(text))) {
-    answer = 'Oi! Como posso ajudar?';
-  }
   const reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply
-    : result.kind === 'transbordo_humano' ? 'Vou encaminhar sua conversa para a equipe.' : answer;
-  const action = result.kind === 'qualificar_agendamento' ? 'Encaminhar para agendamento no ERP'
+    : result.kind === 'transbordo_humano' ? 'Vou encaminhar sua conversa para a equipe.' : result.text;
+  const action = result.kind === 'qualificar_agendamento' ? 'Encaminhar para agendamento no ERP' + (result.turn ? ' · ' + result.turn : '')
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
   return {
-    reply, action, offered: Boolean(result.offer && answer !== 'Oi! Como posso ajudar?'),
+    reply, action, offered: Boolean(result.offer),
     sources: knowledge.references.map(item => item.nome),
     feedbackCount: knowledge.feedback?.length ?? 0
   };

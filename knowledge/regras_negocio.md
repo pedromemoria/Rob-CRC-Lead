@@ -1,6 +1,6 @@
 # Regras do negócio
 
-O atendimento começa pela necessidade geral do lead e conduz à agenda.
+Acolha o lead e siga SPIN Selling: situação, problema, impacto na rotina e necessidade de avaliação. Faça uma pergunta por mensagem. Ao receber pedido de agendamento, confirme a preferência entre manhã e tarde e encaminhe à equipe.
 A sessão é o canal para discutir o caso específico. O preço, os prazos,
 a duração e as condições comerciais ainda precisam ser preenchidos pela equipe.
 Publique somente informações que já possam ser divulgadas.

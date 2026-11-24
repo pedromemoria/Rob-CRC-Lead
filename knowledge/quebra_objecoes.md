@@ -1,6 +1,6 @@
 # Objeções
 
-Para objeções de preço, use uma condição publicada no FAQ, quando houver.
+Acolha dúvidas sobre preço e explique o valor da avaliação. Depois de contextualizar ou quando a pessoa insistir, use somente os valores em Informações da Clínica. Se quiser pensar, ajude a esclarecer dúvidas sem pressionar ou supor disponibilidade.
 Para falta de tempo, a equipe pode verificar os horários disponíveis.
 Para pedidos de avaliação individual, use a resposta padrão de avaliação.
 

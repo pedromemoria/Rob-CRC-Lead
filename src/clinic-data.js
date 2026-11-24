@@ -127,7 +127,13 @@ export function clinicFacts(data) {
   add('servicos', 'Serviços oferecidos', services.map(row => row.nome).join(', '));
   services.forEach((row, index) => {
     add('servico_' + index + '_descricao', row.nome, row.descricao);
-    add('servico_' + index + '_valor', 'Valor de ' + row.nome, row.valor);
+    if (row.valor) {
+      const description = row.descricao?.length <= 90 && !row.descricao.includes('?') ? row.descricao : '';
+      const scope = description ? ' O cadastro informa: ' + description.replace(/[.!]$/, '') + '.'
+        : ' A equipe pode explicar o que está incluso.';
+      options.set('cadastro_servico_' + index + '_valor',
+        'Entendo que o valor seja importante. ' + row.nome + ': ' + row.valor.replace(/[.!]$/, '') + '.' + scope);
+    }
     add('servico_' + index + '_duracao', 'Duração média de ' + row.nome, row.duracao);
     add('servico_' + index + '_pagamento', 'Formas de pagamento de ' + row.nome, row.pagamento);
     add('servico_' + index + '_convenios', 'Convênios de ' + row.nome, row.convenios);
