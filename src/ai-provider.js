@@ -1,6 +1,8 @@
 import OpenAI from 'openai';
 
-const geminiEndpoint = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const geminiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
+export const defaultGeminiModel = 'gemini-3.5-flash-lite';
+const backupGeminiModel = 'gemini-3.1-flash-lite';
 
 function unavailable(status, code) {
   return Object.assign(new Error('Provedor de IA indisponível'), { status, code });
@@ -35,11 +37,11 @@ export function providerFailureMessage(error) {
     else if (status === 400) reason = 'requisição recusada';
     return provider + ' (' + status + ', ' + reason + ')';
   });
-  return 'Falha ao consultar a IA. ' + messages.join('. ') + '.';
+  return 'Falha ao consultar a IA. ' + [...new Set(messages)].join('. ') + '.';
 }
 
-async function geminiCompletion(key, request, fetcher) {
-  const response = await fetcher(geminiEndpoint, {
+async function geminiCompletion(key, model, request, fetcher) {
+  const response = await fetcher(geminiBaseUrl + encodeURIComponent(model) + ':generateContent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     signal: AbortSignal.timeout(14_000),
@@ -54,7 +56,7 @@ async function geminiCompletion(key, request, fetcher) {
           ])) }
       })) }],
       toolConfig: { functionCallingConfig: { mode: 'ANY' } },
-      generationConfig: { temperature: 0.3, maxOutputTokens: 1500, thinkingConfig: { thinkingBudget: 0 } }
+      generationConfig: { maxOutputTokens: 1500 }
     })
   });
   if (!response.ok) {
@@ -74,13 +76,19 @@ async function geminiCompletion(key, request, fetcher) {
   return { provider: 'Gemini', choices: [{ message: { tool_calls: calls } }] };
 }
 
-export function createAIProvider({ geminiKey, openai }, { fetcher = fetch, fallback } = {}) {
+export function createAIProvider({ geminiKey, geminiModel = defaultGeminiModel, openai }, { fetcher = fetch, fallback } = {}) {
   const client = fallback ?? (openai.apiKey ? new OpenAI({ apiKey: openai.apiKey, timeout: 14_000, maxRetries: 0 }) : null);
   return { chat: { completions: { async create(request) {
     const attempts = [];
     if (geminiKey) {
-      try { return await geminiCompletion(geminiKey, request, fetcher); }
-      catch (error) { attempts.push(failedAttempt('Gemini', error)); }
+      const models = [...new Set([geminiModel, backupGeminiModel])];
+      for (const model of models) {
+        try { return await geminiCompletion(geminiKey, model, request, fetcher); }
+        catch (error) {
+          attempts.push(failedAttempt('Gemini', error));
+          if (error?.status !== 404) break;
+        }
+      }
     }
     if (client) {
       try { return { ...await client.chat.completions.create(request), provider: 'OpenAI' }; }

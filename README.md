@@ -27,7 +27,7 @@ No serviço existente, abra **Environment**. Preencha estas três variáveis e c
 | Variável | Valor |
 | --- | --- |
 | `DATABASE_URL` | URI do Supabase em **Connect → Session pooler**, porta 5432, com a senha do banco. Copie a URI sem parâmetros SSL. O Node ativa TLS e verifica o certificado. |
-| `GEMINI_API_KEY` | Chave do Google AI Studio. O robô usa `gemini-2.5-flash` como primeira opção. |
+| `GEMINI_API_KEY` | Chave do Google AI Studio. O robô usa `gemini-3.5-flash-lite` por padrão. Para escolher outro modelo disponível na sua conta, configure `GEMINI_MODEL`. Se o primeiro modelo retornar 404, o robô tenta o `gemini-3.1-flash-lite` antes da OpenAI. |
 | `OPENAI_API_KEY` | Contingência opcional. O serviço precisa de pelo menos uma das duas chaves. |
 | `ADMIN_TOKEN` | Segredo de 32 a 128 caracteres com letras, números, hífen ou sublinhado. Você pode gerar 64 caracteres hexadecimais com `openssl rand -hex 32`. |
 

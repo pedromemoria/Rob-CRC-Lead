@@ -1,5 +1,6 @@
 import { createPublicKey } from 'node:crypto';
 import dotenv from 'dotenv';
+import { defaultGeminiModel } from './ai-provider.js';
 
 const ghlKey = 'MCowBQYDK2VwAyEAi2HR1srL4o18O8BRa7gVJY7G7bupbN3H9AwJrHCDiOg=';
 
@@ -31,6 +32,8 @@ export function loadConfig() {
     throw new Error('Configure DATABASE_URL com a URI PostgreSQL, sem parâmetros SSL');
   }
   const geminiKey = env.GEMINI_API_KEY?.trim();
+  const geminiModel = env.GEMINI_MODEL?.trim() || defaultGeminiModel;
+  if (geminiKey && !/^gemini-[a-z0-9.-]{1,80}$/u.test(geminiModel)) throw new Error('Confira GEMINI_MODEL');
   const openaiKey = env.OPENAI_API_KEY?.trim();
   if (!geminiKey && !openaiKey) throw new Error('Configure GEMINI_API_KEY ou OPENAI_API_KEY');
   const port = Number(env.PORT || 3000);
@@ -44,6 +47,7 @@ export function loadConfig() {
     adminPassword: env.ADMIN_PASSWORD,
     crmEncryptionKey,
     geminiKey,
+    geminiModel,
     openai: { apiKey: openaiKey, model: env.OPENAI_MODEL || 'gpt-4o' },
     ghl: { version: env.GHL_API_VERSION || 'v3', publicKey }
   };

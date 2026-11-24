@@ -921,7 +921,7 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
   let fallbackCalls = 0;
   const fetcher = async (url, request) => {
     calls++;
-    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent');
     assert.equal(request.headers['x-goog-api-key'], 'gemini-for-test');
     const body = JSON.parse(request.body);
     const context = JSON.parse(body.contents[0].parts[0].text);
@@ -929,6 +929,7 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
     assert.equal(context.documentos_de_referencia[0].nome, 'Guia.pdf');
     assert.equal(context.historico.length, 20);
     assert.equal(body.toolConfig.functionCallingConfig.mode, 'ANY');
+    assert.deepEqual(body.generationConfig, { maxOutputTokens: 1500 });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [
       { functionCall: { name: 'conversar', args: { acolhimento: 'Entendo que encontrar o atendimento certo seja importante para você' } } }
     ] } }] }), { status: responseStatus });
@@ -1115,4 +1116,25 @@ test('diagnóstico da IA identifica os provedores sem expor dados do erro origin
     assert.doesNotMatch(message, /test-secret/);
     return true;
   });
+});
+
+test('modelo Gemini indisponível tenta outro Gemini antes de usar a OpenAI', async () => {
+  const modelCalls = [];
+  const provider = createAIProvider({ geminiKey: 'test-key', geminiModel: 'gemini-2.5-flash', openai: {} }, {
+    fetcher: async url => {
+      const model = url.split('/').at(-1);
+      modelCalls.push(model);
+      if (model.startsWith('gemini-2.5-flash:')) return new Response('{}', { status: 404 });
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [
+        { functionCall: { name: 'conversar', args: { acolhimento: 'Entendo a sua dúvida' } } }
+      ] } }] }), { status: 200 });
+    },
+    fallback: { chat: { completions: { create: async () => assert.fail('Segundo Gemini disponível') } } }
+  });
+  const request = { messages: [{ content: '' }, { content: '' }], tools: [{
+    function: { name: 'conversar', parameters: { required: ['acolhimento'], properties: { acolhimento: { type: 'string' } } } }
+  }] };
+  const result = await provider.chat.completions.create(request);
+  assert.equal(result.provider, 'Gemini');
+  assert.deepEqual(modelCalls, ['gemini-2.5-flash:generateContent', 'gemini-3.1-flash-lite:generateContent']);
 });
