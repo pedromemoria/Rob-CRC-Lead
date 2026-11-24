@@ -91,7 +91,7 @@ export function allowBooking(text, evidence, bookingOffered) {
   const lead = normalize(text);
   const quote = normalize(evidence);
   if (/\b(?:nao|talvez|se eu|outra hora|depois|sem compromisso de marcar)\b/.test(lead)) return false;
-  if (/\b(?:quero|vamos|gostaria de|preciso|pode|posso|consegue|como faco para|tem como|da para)\s+(?:ja\s+)?(?:agendar|marcar|reservar|fazer (?:um )?agendamento|confirmar (?:o |a )?(?:horario|consulta|reuniao|sessao|agendamento))\b/.test(quote)) return true;
+  if (/\b(?:quero|desejo|gostaria de|vamos|pretendo|preciso|pode|posso|consegue|como faco para|tem como|da para)\s+(?:ja\s+)?(?:agendar|marcar|reservar|fazer (?:um )?agendamento|confirmar (?:o |a )?(?:horario|consulta|reuniao|sessao|agendamento))\b/.test(quote)) return true;
   if ((bookingOffered || asksAboutBooking(quote)) &&
       /\b(?:manda|mande|envia|envie|passa|passe|enviar|mandar|passar|quero)\b.{0,45}\b(?:link|agenda)\b/.test(quote)) return true;
   if (!bookingOffered) return false;

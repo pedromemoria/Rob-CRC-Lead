@@ -16,10 +16,10 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
 import { createWorker } from '../src/worker.js';
-import { createAIProvider } from '../src/ai-provider.js';
+import { createAIProvider, providerFailureMessage } from '../src/ai-provider.js';
 import { bookingCallbackToken } from '../src/booking.js';
 import { salesReplies } from '../src/sales.js';
-import { bookingHandoffReply, createAgent, replies } from '../src/agent.js';
+import { bookingHandoffReply, bookingInterest, createAgent, replies } from '../src/agent.js';
 import { simulate, validHistory } from '../src/simulator.js';
 import { createApp } from '../src/server.js';
 import { createCrms, OpportunityError } from '../src/crm.js';
@@ -1041,4 +1041,35 @@ test('resposta direta no modo IA não carrega documentos e não exibe fontes', a
   assert.match(answer.reply, /Como posso ajudar/);
   assert.deepEqual(answer.sources, []);
   assert.equal(answer.feedbackCount, 0);
+});
+
+test('desejo agendar uma consulta inicia o fluxo mesmo com o provedor indisponível', async () => {
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'intent')), references: [] };
+  const decide = createAgent({ model: 'test' }, { chat: { completions: {
+    create: async () => assert.fail('A intenção explícita de agendar deve ser tratada antes de chamar a IA')
+  } } });
+  for (const withAI of [true, false]) {
+    const message = await simulate({ text: 'DESEJO AGENDAR UMA CONSULTA', withAI, history: [], knowledge, decide });
+    assert.match(message.reply, /especialidade ou objetivo/);
+  }
+  assert.equal(bookingInterest('Não desejo agendar uma consulta', []), false);
+});
+
+test('diagnóstico da IA identifica os provedores sem expor dados do erro original', async () => {
+  const provider = createAIProvider({ geminiKey: 'gemini-test-secret', openai: {} }, {
+    fetcher: async () => new Response(JSON.stringify({ error: { details: [{ reason: 'API_KEY_INVALID' }],
+      message: 'gemini-test-secret' } }), { status: 400 }),
+    fallback: { chat: { completions: { async create() {
+      throw Object.assign(new Error('openai-test-secret'), { status: 429, code: 'insufficient_quota' });
+    } } } }
+  });
+  const request = { messages: [{ content: '' }, { content: '' }], tools: [] };
+  await assert.rejects(provider.chat.completions.create(request), error => {
+    const message = providerFailureMessage(error);
+    assert.equal(error.status, 429);
+    assert.match(message, /Gemini \(400, chave recusada\)/);
+    assert.match(message, /OpenAI \(429, cota ou créditos insuficientes\)/);
+    assert.doesNotMatch(message, /test-secret/);
+    return true;
+  });
 });

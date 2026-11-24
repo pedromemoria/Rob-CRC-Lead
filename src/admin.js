@@ -8,6 +8,7 @@ import { minimumPasswordLength, normalizedEmail, validEmail } from './accounts.j
 import { adminAuth, loginLimit } from './admin-auth.js';
 import { ClinicDataError, clinicDataFromForm, validateClinicData } from './clinic-data.js';
 import { bookingCallbackToken } from './booking.js';
+import { providerFailureMessage } from './ai-provider.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
 import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, createClinicView, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
@@ -298,10 +299,9 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       res.json(await simulate({ text: text.trim(), history, withAI, decide, knowledge, booking: clinic?.agenda_autonoma }));
     } catch (error) {
       if (!withAI) throw error;
-      const message = [401, 403, 429].includes(error.status)
-        ? 'O provedor de IA recusou a chamada. Confira as chaves, os créditos e os limites ou teste no modo sem IA.'
-        : 'Não foi possível consultar os provedores de IA. Tente novamente ou use a simulação sem IA.';
-      res.status(502).json({ error: message });
+      const failure = providerFailureMessage(error);
+      if (failure) console.warn('Falha nos provedores de IA da simulação', error.attempts);
+      res.status(502).json({ error: failure || 'Não foi possível consultar a IA. Tente novamente ou use a simulação sem IA.' });
     }
   });
 

@@ -181,7 +181,7 @@ export function consultativeDecision(text, history, knowledge, booking, event = 
     return askClosing('turno', previous);
   }
   if (booking || evaluation) {
-    const generic = /^(?:eu )?(?:quero|gostaria de|preciso|posso|como faco para|tem como) (?:agendar|marcar)[.!? ]*$/.test(lead);
+    const generic = /^(?:eu )?(?:quero|desejo|gostaria de|pretendo|preciso|posso|como faco para|tem como) (?:agendar|marcar)(?: (?:uma? |a |o )?(?:consulta|avaliacao|horario))?[.!? ]*$/.test(lead);
     if (generic && !last?.offered && !history.some(step => mentionsGoal(step.inbound ?? ''))) return askClosing('objetivo', previous);
     return askClosing('turno', previous);
   }
