@@ -71,7 +71,7 @@ async function geminiCompletion(key, request, fetcher) {
   if (calls?.length !== 1 || !request.tools.some(tool => tool.function.name === calls[0].function.name)) {
     throw unavailable(502);
   }
-  return { choices: [{ message: { tool_calls: calls } }] };
+  return { provider: 'Gemini', choices: [{ message: { tool_calls: calls } }] };
 }
 
 export function createAIProvider({ geminiKey, openai }, { fetcher = fetch, fallback } = {}) {
@@ -83,7 +83,7 @@ export function createAIProvider({ geminiKey, openai }, { fetcher = fetch, fallb
       catch (error) { attempts.push(failedAttempt('Gemini', error)); }
     }
     if (client) {
-      try { return await client.chat.completions.create(request); }
+      try { return { ...await client.chat.completions.create(request), provider: 'OpenAI' }; }
       catch (error) { attempts.push(failedAttempt('OpenAI', error)); }
     }
     throw new AIProviderError(attempts);

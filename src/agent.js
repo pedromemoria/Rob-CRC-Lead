@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { canSelectClinicFact, clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
-import { consultativeDecision, consultativeFallback, firstName, mentionsPrice, modelHistory, nonRepeatingDecision, normalize, validSalesReply } from './sales.js';
+import { consultativeDecision, consultativeFallback, firstName, isContactPrompt, mentionsPrice, modelHistory, nonRepeatingDecision, normalize, validSalesReply } from './sales.js';
 import { safeReply } from './knowledge.js';
 
 export const replies = {
@@ -113,90 +113,146 @@ export function eligibleSalesReply(text) {
   return validSalesReply(text) && !mentionsOnlineBooking(text) && !mentionsPrice(text);
 }
 
+const conversationTool = tool('conversar', 'Escreve uma frase breve de acolhimento sem pergunta, dado clínico, número ou promessa.',
+  { acolhimento: string });
+const stylePrompt = [
+  'Escreva apenas uma frase curta e humana de acolhimento em português do Brasil, sem pergunta.',
+  'Comece com Oi, Olá, Entendo, Entendi, Imagino, Faz sentido, Claro, Obrigado ou Agradeço.',
+  'Sem dados, números, datas, contatos, orientação clínica, promessas ou links. Não repita a mensagem anterior.',
+  'O sistema vai acrescentar a pergunta ou informação confirmada. Não copie esse conteúdo na sua frase.'
+].join(' ');
+
+function acknowledgmentFrom(call, args) {
+  const text = call === 'conversar' && typeof args.acolhimento === 'string'
+    ? args.acolhimento.trim().replace(/[.!]+$/u, '') : '';
+  if (text.length >= 3 && text.length <= 95 && safeReply(text) &&
+      /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|obrigad[oa]|agradeco)\b/.test(normalize(text)) &&
+      !/[.?!0-9]/u.test(text) &&
+      !/\b(?:cura|diagnostic\w*|doenc\w*|cancer|indic\w*|sintoma|tratamento|medicamento|garant\w*|precisa|deve|piora|provavel|risco|link|disponivel)\b/.test(normalize(text))) {
+    return text;
+  }
+}
+
+export function addAcknowledgment(text, acknowledgment, previous) {
+  if (!acknowledgment) return text;
+  const greeting = /^(?:Oi, [^!]+!|Oi!)/u.exec(text);
+  // Keep the name or greeting already validated by the application.
+  const preface = greeting && /^(oi|ola)\b/.test(normalize(acknowledgment))
+    ? acknowledgment.replace(/^(?:oi|olá)[, ]*/iu, '') : acknowledgment;
+  const styled = preface && !normalize(text).startsWith(normalize(preface))
+    ? (greeting ? greeting[0] + ' ' + preface + '. ' + text.slice(greeting[0].length).trimStart()
+      : text.includes('Encontrei estas opções na agenda:\n') ? preface + '. ' + text
+        : preface + '.\n' + text) : text;
+  return styled !== previous && validSalesReply(styled) ? styled : text;
+}
+
+function unpackTool(result) {
+  const calls = result.choices?.[0]?.message?.tool_calls;
+  const call = calls?.length === 1 && calls[0].type === 'function' ? calls[0].function : null;
+  try {
+    const args = JSON.parse(call?.arguments);
+    if (args && typeof args === 'object' && Object.keys(args).length === 1) return { name: call.name, args };
+  } catch {
+    // An incomplete or invalid model response is handled by the reply policy.
+  }
+  return { args: {} };
+}
+
 export function createAgent(config, client = new OpenAI({
   apiKey: config.apiKey, timeout: 20000, maxRetries: 0
 })) {
-  async function decide(event, history, knowledge, recordContext) {
+  const askModel = (system, data, tools) => client.chat.completions.create({
+    model: config.model, temperature: 0, store: false, max_completion_tokens: 300,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(data) }],
+    parallel_tool_calls: false,
+    tool_choice: 'required',
+    tools
+  });
+
+  async function decide(event, history, knowledge) {
     const lead = normalize(event.text);
     const reason = explicitHandoff(lead);
-    if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
-    if (wantsAssessment(lead)) return { kind: 'responder', text: replies.avaliacao, offer: true };
-    const consultation = consultativeDecision(event.text, history, knowledge, bookingInterest(event.text, history), event);
-    if (consultation) return consultation;
+    const last = history.at(-1);
     const fallback = consultativeFallback(history, firstName(event.leadName), event.text);
-    if (!history.length && /^(?:oi|ola|bom dia|boa tarde|boa noite)[.! ]*$/u.test(lead)) return fallback;
+    const closingContact = isContactPrompt(last?.outbound);
+    const fixed = reason || !lead ? { kind: 'transbordo_humano', reason: reason || 'midia' }
+      : wantsAssessment(lead) ? { kind: 'responder', text: replies.avaliacao, offer: true }
+        : consultativeDecision(event.text, history, knowledge, bookingInterest(event.text, history), event) ??
+          (!history.length && /^(?:oi|ola|bom dia|boa tarde|boa noite)[.! ]*$/u.test(lead) ? fallback : null);
+
     const { files, replies: approved, clinicData } = knowledge;
     const facts = clinicFacts(clinicData);
     const options = new Map([...approved, ...facts, ...Object.entries(replies), ['spin_proximo', fallback.text]]
       .filter(([id, answer]) => !id.endsWith('_valor') && eligibleSalesReply(answer)));
-    const last = history.at(-1);
-    const context = knowledge.loadContext ? await knowledge.loadContext() : knowledge;
-    const result = await client.chat.completions.create({
-      model: config.model, temperature: 0, store: false, max_completion_tokens: 300,
-      messages: [
-        { role: 'system', content: prompt },
-        { role: 'user', content: JSON.stringify({
-          base_de_conhecimento: files,
-          nome_da_clinica: knowledge.clinicName,
-          dados_da_clinica: clinicData ?? {},
-          feedbacks_da_clinica: context.feedback ?? [],
-          documentos_de_referencia: context.references ?? [],
-          respostas_disponiveis: Object.fromEntries(options),
-          historico: modelHistory(history),
-          mensagem_atual: event.text
-        }) }
-      ],
-      parallel_tool_calls: false,
-      tool_choice: 'required',
-      tools: [
-        tool('conversar', 'Escreve uma frase curta de empatia sem pergunta ou afirmação factual.', { acolhimento: string }),
-        tool('responder', 'Seleciona uma resposta curta e publicada, sem editar o texto.', { resposta_id: string }),
-        tool('transbordo_humano', 'Pausa a IA e cria uma tarefa para a equipe.', {
-          motivo: choice(['humano', 'irritacao', 'fora_escopo', 'descadastro'])
-        })
-      ]
-    });
-    if (knowledge.loadContext) recordContext(context);
-    const calls = result.choices?.[0]?.message?.tool_calls;
-    const call = calls?.length === 1 && calls[0].type === 'function' ? calls[0].function : null;
-    let args;
+    const context = closingContact || reason ? { references: [], feedback: [] }
+      : knowledge.loadContext ? await knowledge.loadContext() : knowledge;
+    const data = {
+      historico: modelHistory(history),
+      mensagem_atual: closingContact ? '[dado de contato para agendamento]' : event.text,
+      base_de_conhecimento: files,
+      nome_da_clinica: knowledge.clinicName,
+      dados_da_clinica: clinicData ?? {},
+      feedbacks_da_clinica: context.feedback ?? [],
+      documentos_de_referencia: context.references ?? []
+    };
+    let result;
     try {
-      args = JSON.parse(call?.arguments);
-    } catch {
-      args = {};
+      result = fixed
+        ? await askModel(stylePrompt, { ...data, etapa: fixed.kind, proxima_resposta: fixed.text }, [conversationTool])
+        : await askModel(prompt, { ...data, respostas_disponiveis: Object.fromEntries(options) }, [
+          conversationTool,
+          tool('responder', 'Seleciona uma resposta curta e publicada, sem editar o texto.', { resposta_id: string }),
+          tool('transbordo_humano', 'Pausa a IA e cria uma tarefa para a equipe.', {
+            motivo: choice(['humano', 'irritacao', 'fora_escopo', 'descadastro'])
+          })
+        ]);
+    } catch (error) {
+      // Provider outages must not block opt-out or an explicit request for a human.
+      if (fixed?.kind === 'transbordo_humano' && !knowledge.simulator) return fixed;
+      throw error;
     }
-    if (!args || typeof args !== 'object' || Object.keys(args).length !== 1) args = {};
-    if (call?.name === 'transbordo_humano' &&
-        ['humano', 'irritacao', 'fora_escopo', 'descadastro'].includes(args.motivo)) {
-      return { kind: 'transbordo_humano', reason: args.motivo };
-    }
-    const matched = matchClinicFact(clinicData, facts, event.text, last?.inbound) ??
-      matchClinicObservation(clinicData, facts, event.text);
-    const selectedId = call?.name === 'responder' && typeof args.resposta_id === 'string' ? args.resposta_id : '';
-    const official = options.has(selectedId) ? facts.get(selectedId) : null;
-    const selected = official
-      ? (canSelectClinicFact(clinicData, selectedId, event.text, last?.inbound) ? official : replies.sem_informacao)
-      : options.get(selectedId);
-    if (eligibleSalesReply(matched)) return { kind: 'responder', text: matched };
-    if (call?.name === 'conversar') {
-      const acknowledgment = typeof args.acolhimento === 'string' ? args.acolhimento.trim().replace(/[.!]+$/u, '') : '';
-      if (acknowledgment.length <= 95 && safeReply(acknowledgment) &&
-          /^(?:entendo|imagino|faz sentido|obrigad[oa]|agradeco)\b/.test(normalize(acknowledgment)) &&
-          !/[.?!0-9]/u.test(acknowledgment) &&
-          !/\b(?:cura|diagnostic\w*|doenc\w*|cancer|indic\w*|sintoma|tratamento|medicamento|garant\w*|precisa|deve|piora|provavel|risco|link|disponivel)\b/.test(normalize(acknowledgment))) {
-        const question = fallback.text.match(/[^.!?]+\?$/u)?.[0]?.trim();
-        const text = acknowledgment + '.' + (question ? ' ' + question : '');
-        if (eligibleSalesReply(text)) return { ...fallback, text };
+    const call = unpackTool(result);
+    const acknowledgment = acknowledgmentFrom(call.name, call.args);
+    const ai = {
+      ...(result.provider ? { provider: result.provider } : {}),
+      ...(acknowledgment ? { acknowledgment } : {}),
+      ...(knowledge.loadContext ? { modelContext: context } : {})
+    };
+    let decision = fixed;
+    if (!decision) {
+      const matched = matchClinicFact(clinicData, facts, event.text, last?.inbound) ??
+        matchClinicObservation(clinicData, facts, event.text);
+      const selectedId = call.name === 'responder' && typeof call.args.resposta_id === 'string' ? call.args.resposta_id : '';
+      const official = options.has(selectedId) ? facts.get(selectedId) : null;
+      const selected = official
+        ? (canSelectClinicFact(clinicData, selectedId, event.text, last?.inbound) ? official : replies.sem_informacao)
+        : options.get(selectedId);
+      if (call.name === 'transbordo_humano' &&
+          ['humano', 'irritacao', 'fora_escopo', 'descadastro'].includes(call.args.motivo)) {
+        decision = { kind: 'transbordo_humano', reason: call.args.motivo };
+      } else if (eligibleSalesReply(matched)) {
+        decision = { kind: 'responder', text: matched };
+      } else if (selectedId === 'spin_proximo' || selected === last?.outbound || !(official || safeReply(selected))) {
+        decision = fallback;
+      } else {
+        decision = { kind: 'responder', text: selected,
+          offer: offersBooking(selected) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(selected) };
       }
     }
-    if (selectedId === 'spin_proximo' || selected === last?.outbound || !(official || safeReply(selected))) return fallback;
-    const text = selected;
-    return { kind: 'responder', text,
-      offer: offersBooking(text) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(text) };
+    decision = nonRepeatingDecision(decision, history);
+    if (decision.kind !== 'responder') return { ...decision, ...ai };
+    const styled = addAcknowledgment(decision.text, ai.acknowledgment, last?.outbound);
+    return styled === decision.text ? { ...decision, ...ai } :
+      { ...decision, ...ai, baseText: decision.text, text: styled };
   }
-  return async (event, history, knowledge) => {
-    let modelContext;
-    const decision = nonRepeatingDecision(await decide(event, history, knowledge, context => { modelContext = context; }), history);
-    return modelContext ? { ...decision, modelContext } : decision;
+
+  decide.styleReply = async (text, history) => {
+    const result = await askModel(stylePrompt, { etapa: 'Retorno da agenda ou do agendamento',
+      mensagem_validada: text.replace(/https?:\/\/\S+/gu, '[link da agenda]') }, [conversationTool]);
+    const call = unpackTool(result);
+    const acknowledgment = acknowledgmentFrom(call.name, call.args);
+    return { text: addAcknowledgment(text, acknowledgment, history.at(-1)?.outbound),
+      provider: result.provider ?? 'OpenAI' };
   };
+  return decide;
 }

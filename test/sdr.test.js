@@ -99,7 +99,7 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   assert.equal((await decide({ text: 'Pode diagnosticar o meu caso?' }, [], knowledge)).text, replies.avaliacao);
   assert.equal((await decide({ text: 'Quero falar com um humano' }, [], knowledge)).kind, 'transbordo_humano');
   assert.equal((await decide({ text: 'Pare de me enviar mensagens' }, [], knowledge)).reason, 'descadastro');
-  assert.equal(requests, 1);
+  assert.equal(requests, 9);
 
   clinic.faq = '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n';
   knowledge = clinicKnowledge(clinic);
@@ -975,8 +975,13 @@ test('GoHighLevel reserva um horário verificado e atualiza a oportunidade uma �
       return { data: {} };
     }
   }));
-  const worker = createWorker({ store, integrationFor: clinics.integration, crmFor,
-    decide: async () => ({ kind: 'qualificar_agendamento', turn: 'tarde' }) });
+  const decide = async () => ({ kind: 'qualificar_agendamento', turn: 'tarde', acknowledgment: 'Claro, vou verificar' });
+  const styled = [];
+  decide.styleReply = async text => {
+    styled.push(text);
+    return { text: 'Que bom poder ajudar. ' + text, provider: 'Gemini' };
+  };
+  const worker = createWorker({ store, integrationFor: clinics.integration, crmFor, decide });
   await store.enqueue([event('find', id, 'calendar')]);
   await worker.tick();
   assert.match(events[0][1], /1\..*\n2\./);
@@ -985,7 +990,9 @@ test('GoHighLevel reserva um horário verificado e atualiza a oportunidade uma �
   assert.deepEqual(events.map(x => x[0]), ['send', 'book', 'stage', 'send']);
   assert.equal(events[1][1].ignoreFreeSlotValidation, false);
   assert.equal(events[1][1].contactId, '99');
-  assert.match(events[3][1], /confirmada/);
+  assert.match(events[0][1], /^Claro, vou verificar/);
+  assert.match(events[3][1], /^Que bom poder ajudar\. Sua avaliação está confirmada/);
+  assert.equal(styled.length, 1);
   assert.equal(await store.paused(id, leadKey(event('choose', id, 'calendar'))), false);
 });
 
@@ -1031,28 +1038,64 @@ test('simulador aceita a escolha entre dois horários fictícios', async () => {
   assert.match(selection.reply, /Reserva simulada/);
 });
 
-test('resposta direta no modo IA não carrega documentos e não exibe fontes', async () => {
+test('IA participa da saudação com os documentos habilitados', async () => {
+  const references = [{ nome: 'Manual.pdf', trecho: 'Horários da clínica' }];
+  let calls = 0;
   const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'sources')),
-    loadContext: async () => assert.fail('A consulta de documentos é feita apenas para o modelo') };
-  const decide = createAgent({ model: 'test' }, { chat: { completions: {
-    create: async () => assert.fail('Saudação direta não precisa chamar o provedor')
-  } } });
+    loadContext: async () => ({ references, feedback: [] }) };
+  const decide = createAgent({ model: 'test' }, { chat: { completions: { async create(request) {
+    calls++;
+    assert.equal(JSON.parse(request.messages[1].content).mensagem_atual, 'Oi');
+    return { ...modelResult('conversar', { acolhimento: 'Olá, que bom receber você' }), provider: 'Gemini' };
+  } } } });
   const answer = await simulate({ text: 'Oi', history: [], knowledge, withAI: true, decide });
-  assert.match(answer.reply, /Como posso ajudar/);
-  assert.deepEqual(answer.sources, []);
-  assert.equal(answer.feedbackCount, 0);
+  assert.match(answer.reply, /que bom receber você.*Como posso ajudar/);
+  assert.deepEqual(answer.sources, ['Manual.pdf']);
+  assert.equal(answer.provider, 'Gemini');
+  assert.equal(calls, 1);
 });
 
-test('desejo agendar uma consulta inicia o fluxo mesmo com o provedor indisponível', async () => {
+test('desejo agendar aciona a IA e mantém a pergunta de fechamento validada', async () => {
   const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'intent')), references: [] };
-  const decide = createAgent({ model: 'test' }, { chat: { completions: {
-    create: async () => assert.fail('A intenção explícita de agendar deve ser tratada antes de chamar a IA')
-  } } });
+  let calls = 0;
+  const decide = createAgent({ model: 'test' }, { chat: { completions: { async create() {
+    calls++;
+    return { ...modelResult('conversar', { acolhimento: 'Claro, que bom conversar com você' }), provider: 'Gemini' };
+  } } } });
   for (const withAI of [true, false]) {
     const message = await simulate({ text: 'DESEJO AGENDAR UMA CONSULTA', withAI, history: [], knowledge, decide });
     assert.match(message.reply, /especialidade ou objetivo/);
+    assert.equal(message.provider, withAI ? 'Gemini' : undefined);
   }
+  assert.equal(calls, 1);
   assert.equal(bookingInterest('Não desejo agendar uma consulta', []), false);
+});
+
+test('IA participa do agendamento inteiro e preserva o horário e os dados privados', async () => {
+  const booking = { calendarId: 'test', timezone: 'America/Fortaleza', duration: 30 };
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'ai-conversa')), references: [] };
+  const calls = [];
+  const decide = createAgent({ model: 'test' }, { chat: { completions: { async create(request) {
+    calls.push(JSON.parse(request.messages[1].content));
+    return { ...modelResult('conversar', { acolhimento: 'Claro, vou ajudar com isso' }), provider: 'Gemini' };
+  } } } });
+  const history = [];
+  const send = async text => {
+    const result = await simulate({ text, history, knowledge, withAI: true, decide, booking });
+    history.push({ inbound: text, outbound: result.reply, offered: result.offered, agenda_ofertada: result.agenda_ofertada });
+    assert.equal(result.provider, 'Gemini');
+    return result;
+  };
+  assert.match((await send('Oi')).reply, /Como posso ajudar/);
+  assert.match((await send('Quero agendar de manhã')).reply, /nome completo/);
+  assert.match((await send('Ana Pereira')).reply, /telefone ou WhatsApp/);
+  const offered = await send('85999887766');
+  assert.equal(offered.agenda_ofertada.length, 2);
+  assert.match(offered.reply, /Encontrei estas opções na agenda/);
+  const booked = await send('1');
+  assert.ok(booked.reply.includes(offered.agenda_ofertada[0].text));
+  assert.equal(calls.length, 5);
+  assert.doesNotMatch(JSON.stringify(calls), /Ana Pereira|85999887766/);
 });
 
 test('diagnóstico da IA identifica os provedores sem expor dados do erro original', async () => {

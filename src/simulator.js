@@ -1,4 +1,4 @@
-import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, handoffReasons, bookingHandoffReply, replies } from './agent.js';
+import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, addAcknowledgment, handoffReasons, bookingHandoffReply, replies } from './agent.js';
 import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
 import { consultativeDecision, consultativeFallback, nonRepeatingDecision } from './sales.js';
 import { availableOptions, chosenOption, slotMessage } from './booking.js';
@@ -43,21 +43,31 @@ export async function simulate({ text, history, withAI, knowledge, decide, booki
   const pending = booking.calendarId && history.at(-1)?.agenda_ofertada;
   if (pending?.length && !explicitHandoff(normalize(text))) {
     const index = chosenOption(text, pending);
-    if (index >= 0) return { reply: 'Reserva simulada para ' + pending[index].text + '.',
-      action: 'Simular alteração para Agendado', offered: false, sources: [], feedbackCount: 0 };
+    if (index >= 0) {
+      const text = 'Reserva simulada para ' + pending[index].text + '.';
+      const styled = withAI && decide.styleReply ? await decide.styleReply(text, history) : { text };
+      return { reply: styled.text, provider: styled.provider, action: 'Simular alteração para Agendado',
+        offered: false, sources: [], feedbackCount: 0 };
+    }
   }
-  const decision = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
-  const result = nonRepeatingDecision(decision, history);
+  const decision = withAI ? await decide({ text }, history, { ...knowledge, simulator: true }) : offline(text, history, knowledge);
+  const result = withAI ? decision : nonRepeatingDecision(decision, history);
+  const styled = text => addAcknowledgment(text, decision.acknowledgment, history.at(-1)?.outbound);
+  const info = {
+    provider: decision.provider,
+    sources: withAI ? decision.modelContext?.references?.map(item => item.nome) ?? [] : [],
+    feedbackCount: withAI ? decision.modelContext?.feedback?.length ?? 0 : 0
+  };
   if (result.kind === 'qualificar_agendamento' && booking.calendarId) {
     const now = Date.now();
     const exampleSlots = [1, 2].map(days => new Date(now + days * 86_400_000).toISOString());
     const options = availableOptions(exampleSlots, booking, result.turn, now);
-    return { reply: 'Horários de exemplo. ' + slotMessage(options), action: 'Escolher horário simulado',
-      agenda_ofertada: options, offered: false, sources: [], feedbackCount: 0 };
+    return { reply: styled('Horários de exemplo. ' + slotMessage(options)), action: 'Escolher horário simulado',
+      agenda_ofertada: options, offered: false, ...info };
   }
   if (result.kind === 'qualificar_agendamento' && booking.bookingLink) {
-    return { reply: 'No atendimento, o robô enviaria o link da agenda da clínica.', action: 'Simular envio do link',
-      offered: false, sources: [], feedbackCount: 0 };
+    return { reply: styled('No atendimento, o robô enviaria o link da agenda da clínica.'), action: 'Simular envio do link',
+      offered: false, ...info };
   }
   let reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply
     : result.kind === 'transbordo_humano' ? 'Vou encaminhar sua conversa para a equipe.' : result.text;
@@ -66,9 +76,5 @@ export async function simulate({ text, history, withAI, knowledge, decide, booki
   }
   const action = result.kind === 'qualificar_agendamento' ? 'Encaminhar para agendamento no ERP' + (result.turn ? ' · ' + result.turn : '')
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
-  return {
-    reply, action, offered: Boolean(result.offer),
-    sources: withAI ? decision.modelContext?.references?.map(item => item.nome) ?? [] : [],
-    feedbackCount: withAI ? decision.modelContext?.feedback?.length ?? 0 : 0
-  };
+  return { reply: result.kind === 'responder' ? reply : styled(reply), action, offered: Boolean(result.offer), ...info };
 }

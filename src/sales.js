@@ -55,7 +55,16 @@ const closingPrompts = {
   ]
 };
 
-const turnOffer = text => [...closingPrompts.turno, salesReplies.tempo].includes(text);
+const stableReplies = new Set([...Object.values(closingPrompts).flat(), ...Object.values(salesReplies)]);
+
+export function baseSalesReply(text) {
+  if (typeof text !== 'string') return text;
+  const separator = text.indexOf('\n');
+  const suffix = separator >= 0 ? text.slice(separator + 1) : text;
+  return stableReplies.has(suffix) ? suffix : text;
+}
+
+const turnOffer = text => [...closingPrompts.turno, salesReplies.tempo].includes(baseSalesReply(text));
 const offer = text => turnOffer(text) || text === salesReplies.necessidade;
 const response = (text, booking = false) => ({ kind: 'responder', text, offer: booking || offer(text) });
 
@@ -66,7 +75,7 @@ function askClosing(step, last) {
 
 function latestAnswer(history, prompts, parse) {
   for (let index = history.length - 1; index >= 0; index--) {
-    if (!prompts.includes(history[index].outbound)) continue;
+    if (!prompts.includes(baseSalesReply(history[index].outbound))) continue;
     const value = parse(history[index + 1]?.inbound ?? '');
     if (value) return value;
   }
@@ -114,7 +123,7 @@ const sameReply = (first, second) => normalize(first ?? '').replace(/[^\p{L}\d]+
   normalize(second ?? '').replace(/[^\p{L}\d]+/gu, ' ').trim();
 
 export function nonRepeatingDecision(decision, history) {
-  if (decision.kind !== 'responder' || !sameReply(decision.text, history.at(-1)?.outbound)) return decision;
+  if (decision.kind !== 'responder' || !sameReply(decision.text, baseSalesReply(history.at(-1)?.outbound))) return decision;
   for (const [step, prompts] of Object.entries(closingPrompts)) {
     if (prompts.includes(decision.text)) {
       return response(prompts.find(prompt => !sameReply(prompt, decision.text)), step === 'turno');
@@ -125,11 +134,15 @@ export function nonRepeatingDecision(decision, history) {
   return response('Tudo bem. Posso ajudar com uma dúvida sobre a consulta ou encaminhar um pedido de agendamento.');
 }
 
+export function isContactPrompt(outbound) {
+  const previous = baseSalesReply(outbound);
+  return closingPrompts.nome.includes(previous) || closingPrompts.telefone.includes(previous);
+}
+
 export function modelHistory(history) {
   const result = history.map((turn, index) => {
     const previous = history[index - 1]?.outbound;
-    const closingContact = closingPrompts.nome.includes(previous) || closingPrompts.telefone.includes(previous);
-    return { lead: closingContact ? '[dado de contato para agendamento]' : turn.inbound, sdr: turn.outbound };
+    return { lead: isContactPrompt(previous) ? '[dado de contato para agendamento]' : turn.inbound, sdr: turn.outbound };
   });
   let chars = 0;
   return result.reverse().filter(turn => {
@@ -151,7 +164,7 @@ export function closingContext(plan) {
 export function consultativeDecision(text, history, knowledge, booking, event = {}) {
   const lead = normalize(text);
   const last = history.at(-1);
-  const previous = last?.outbound;
+  const previous = baseSalesReply(last?.outbound);
   if (noPressure.test(lead) || /\b(?:(?:nao quero|nao preciso) (?:mais|agendar|marcar|fazer|de uma avaliacao)|nao tenho interesse|desisti|melhor nao)\b/.test(lead)) {
     return response(salesReplies.pensar);
   }
@@ -187,8 +200,8 @@ export function consultativeDecision(text, history, knowledge, booking, event = 
   }
 
   if (priceQuestion.test(lead)) {
-    const discussed = history.some(step => step.outbound === salesReplies.necessidade ||
-      step.outbound === salesReplies.impacto || step.outbound === salesReplies.preco_contexto);
+    const discussed = history.some(step => [salesReplies.necessidade, salesReplies.impacto, salesReplies.preco_contexto]
+      .includes(baseSalesReply(step.outbound)));
     const repeated = history.slice(-4).some(step => priceQuestion.test(normalize(step.inbound ?? '')));
     if (!discussed && !repeated && !priceInsistence.test(lead)) return response(salesReplies.preco_contexto);
     const priceFacts = new Map([...clinicFacts(knowledge.clinicData)].filter(([id]) => id.endsWith('_valor')));

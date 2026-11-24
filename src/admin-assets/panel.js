@@ -159,7 +159,8 @@ if (sim) {
       const notes = answer.feedbackCount
         ? ' · Feedbacks enviados à IA (' + answer.feedbackCount + ')'
         : '';
-      message('robot', answer.reply, answer.action + sources + notes);
+      const provider = answer.provider ? ' · IA: ' + answer.provider : (withAI ? '' : ' · Sem IA');
+      message('robot', answer.reply, answer.action + provider + sources + notes);
       history.push({ inbound: text, outbound: answer.reply, offered: answer.offered, agenda_ofertada: answer.agenda_ofertada });
       if (history.length > 80) history.shift();
       sim.elements.mensagem.value = '';
