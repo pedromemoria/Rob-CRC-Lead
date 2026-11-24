@@ -4,14 +4,15 @@ import { createPool } from './database.js';
 import express from 'express';
 import { loadConfig } from './config.js';
 import { createStore } from './store.js';
-import { createKnowledge, KnowledgeError } from './knowledge.js';
+import { KnowledgeError } from './knowledge.js';
+import { createClinics } from './clinics.js';
 import { createAgent } from './agent.js';
 import { createCrms } from './crm.js';
 import { createWorker } from './worker.js';
 import { webhooks } from './webhooks.js';
 import { admin } from './admin.js';
 
-export function createApp(config, store, knowledge) {
+export function createApp(config, store, clinics) {
   const app = express();
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -19,8 +20,8 @@ export function createApp(config, store, knowledge) {
     next();
   });
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
-  app.use('/webhooks', webhooks(config, store));
-  app.use('/admin', admin(config, knowledge, store));
+  app.use('/webhook', webhooks(config, store, clinics));
+  app.use('/admin', admin(config, clinics, store));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) {
@@ -36,17 +37,18 @@ export function createApp(config, store, knowledge) {
 export async function start() {
   const config = loadConfig();
   const pool = createPool(config.database);
-  let knowledge;
+  let clinics;
   try {
     const { rows: [schema] } = await pool.query(
       "SELECT to_regclass('sdr.jobs') AS jobs, to_regclass('sdr.history') AS history," +
-      " to_regclass('sdr.paused') AS paused, to_regclass('sdr.knowledge') AS knowledge"
+      " to_regclass('sdr.paused') AS paused, to_regclass('sdr.clinicas') AS clinicas," +
+      " (SELECT count(*) = 3 FROM information_schema.columns WHERE table_schema = 'sdr'" +
+      " AND table_name IN ('jobs','paused','history') AND column_name = 'clinica_id') AS tenant_columns"
     );
     if (!Object.values(schema).every(Boolean)) {
-      throw new Error('Execute supabase/schema.sql no SQL Editor antes de iniciar.');
+      throw new Error('Execute supabase/schema.sql e supabase/multi-clinica.sql no SQL Editor antes de iniciar.');
     }
-    knowledge = createKnowledge(fileURLToPath(new URL('../knowledge/', import.meta.url)), pool);
-    await knowledge.load();
+    clinics = createClinics(pool, config, fileURLToPath(new URL('../knowledge/', import.meta.url)));
   } catch (error) {
     await pool.end();
     if (!error.code) throw error;
@@ -54,10 +56,10 @@ export async function start() {
   }
   const store = createStore(pool);
   const worker = createWorker({
-    store, decide: createAgent(config.openai, knowledge),
-    crms: createCrms(config), bookingUrl: config.bookingUrl
+    store, decide: createAgent(config.openai),
+    integrationFor: clinics.integration, crmFor: createCrms
   });
-  const server = createApp(config, store, knowledge).listen(config.port, config.host, () => {
+  const server = createApp(config, store, clinics).listen(config.port, config.host, () => {
     worker.start();
     console.log('Agente SDR escutando na porta ' + config.port);
   });

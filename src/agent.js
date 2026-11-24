@@ -84,15 +84,15 @@ function allowBooking(text, evidence, bookingOffered) {
     /^(?:amanha|hoje|segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:.{0,32})(?:funciona|serve|pode ser)[.! ]*$/.test(lead);
 }
 
-export function createAgent(config, knowledge, client = new OpenAI({
+export function createAgent(config, client = new OpenAI({
   apiKey: config.apiKey, timeout: 20000, maxRetries: 0
 })) {
-  return async function decide(event, history) {
+  return async function decide(event, history, knowledge) {
     const lead = normalize(event.text);
     const reason = explicitHandoff(lead);
     if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
     const assessment = wantsAssessment(lead);
-    const { files, replies: approved } = await knowledge.load();
+    const { files, replies: approved } = knowledge;
     const options = new Map([...approved, ...Object.entries(replies)]);
     const last = history.at(-1);
     const result = await client.chat.completions.create({

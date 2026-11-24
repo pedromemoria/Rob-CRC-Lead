@@ -14,11 +14,11 @@ export function createCrms(config, makeClient = options => axios.create(options)
 
   const k = config.kommo;
   const g = config.ghl;
-  const kommo = client('https://' + k.subdomain + '.kommo.com/api/v4', k.token);
-  const ghl = client('https://services.leadconnectorhq.com', g.token, { Version: g.version });
+  const kommo = k && client('https://' + k.subdomain + '.kommo.com/api/v4', k.token);
+  const ghl = g && client('https://services.leadconnectorhq.com', g.token, { Version: g.version });
 
   return {
-    kommo: {
+    kommo: k && {
       async qualify(event) {
         const url = '/leads/' + event.leadId;
         const { data: lead } = await kommo.get(url);
@@ -40,7 +40,7 @@ export function createCrms(config, makeClient = options => axios.create(options)
         }]);
       }
     },
-    ghl: {
+    ghl: g && {
       async qualify(event) {
         const { data } = await ghl.get('/opportunities/search', {
           params: { locationId: g.locationId, pipelineId: g.pipelineId,

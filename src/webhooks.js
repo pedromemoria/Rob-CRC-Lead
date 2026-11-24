@@ -1,5 +1,6 @@
 import { timingSafeEqual, verify } from 'node:crypto';
 import express from 'express';
+import { hashWebhook } from './clinics.js';
 
 const id = /^[A-Za-z0-9_-]{1,128}$/;
 const numeric = /^[1-9]\d{0,14}$/;
@@ -59,19 +60,27 @@ export function ghlEvents(body, config) {
   }];
 }
 
-export function webhooks(config, store) {
+export function webhooks(config, store, clinics) {
   const router = express.Router();
-  router.post('/kommo/:token', (req, res, next) => {
-    if (!equalSecret(req.params.token, config.kommo.webhookToken)) return res.sendStatus(401);
+  router.post('/kommo/:clinicaId', async (req, res, next) => {
     if (!req.is('application/x-www-form-urlencoded')) return res.sendStatus(415);
+    const token = req.query.token;
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(token)) return res.sendStatus(401);
+    const clinic = await clinics.routing(req.params.clinicaId);
+    if (clinic?.crm_tipo !== 'kommo' || !equalSecret(hashWebhook(token), clinic.webhook_token_hash)) {
+      return res.sendStatus(401);
+    }
+    res.locals.clinic = clinic;
     next();
   }, express.urlencoded({ extended: true, limit: '256kb', parameterLimit: 4000, depth: 8, inflate: false }),
   async (req, res) => {
-    await store.enqueue(kommoEvents(req.body, config.kommo));
+    const clinic = res.locals.clinic;
+    const events = kommoEvents(req.body, { accountId: clinic.kommo_conta_id, subdomain: clinic.crm_account_id });
+    await store.enqueue(events.map(event => ({ ...event, clinicId: clinic.id })));
     res.sendStatus(200);
   });
 
-  router.post('/ghl', (req, res, next) => {
+  router.post('/ghl/:clinicaId', (req, res, next) => {
     if (!req.is('application/json')) return res.sendStatus(415);
     next();
   }, express.raw({ type: 'application/json', limit: '256kb', inflate: false }), async (req, res) => {
@@ -82,7 +91,10 @@ export function webhooks(config, store) {
     } catch {
       return res.sendStatus(400);
     }
-    await store.enqueue(ghlEvents(body, config.ghl));
+    const clinic = await clinics.routing(req.params.clinicaId);
+    if (clinic?.crm_tipo !== 'ghl') return res.sendStatus(404);
+    const events = ghlEvents(body, { locationId: clinic.crm_account_id });
+    await store.enqueue(events.map(event => ({ ...event, clinicId: clinic.id })));
     res.sendStatus(200);
   });
   return router;
