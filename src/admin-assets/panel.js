@@ -126,7 +126,7 @@ if (sim) {
     try {
       const response = await fetch(sim.action, { method: 'POST', headers: {
         'Content-Type': 'application/json', 'X-CSRF-Token': sim.elements._csrf.value
-      }, body: JSON.stringify({ text, withAI, history: history.slice(-12), nome_clinica: name }) });
+      }, body: JSON.stringify({ text, withAI, history: history.slice(-80), nome_clinica: name }) });
       const answer = await response.json();
       if (!response.ok) throw new Error(answer.error || 'Falha no teste.');
       message('lead', text);
@@ -135,8 +135,8 @@ if (sim) {
         ? ' · Feedbacks ' + (withAI ? 'enviados à IA' : 'cadastrados') + ' (' + answer.feedbackCount + ')'
         : '';
       message('robot', answer.reply, answer.action + sources + notes);
-      history.push({ inbound: text, outbound: answer.reply, offered: answer.offered });
-      if (history.length > 12) history.shift();
+      history.push({ inbound: text, outbound: answer.reply, offered: answer.offered, agenda_ofertada: answer.agenda_ofertada });
+      if (history.length > 80) history.shift();
       sim.elements.mensagem.value = '';
       status.textContent = '';
     } catch (error) {

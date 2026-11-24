@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { SlotUnavailable } from './booking.js';
 
 export class OpportunityError extends Error {}
 
@@ -41,6 +42,38 @@ export function createCrms(config, makeClient = options => axios.create(options)
       }
     },
     ghl: g && {
+      async slots(booking, now = Date.now()) {
+        const { data } = await ghl.get('/calendars/' + booking.calendarId + '/free-slots', {
+          params: { startDate: now, endDate: now + 14 * 86_400_000, timezone: booking.timezone }
+        });
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Resposta inválida da agenda');
+        return Object.entries(data).filter(([date, value]) => /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+          Array.isArray(value?.slots)).flatMap(([, value]) => value.slots.filter(slot => typeof slot === 'string'));
+      },
+      async book(event, booking, start) {
+        const endTime = new Date(Date.parse(start) + booking.duration * 60_000).toISOString();
+        try {
+          const { data } = await ghl.post('/calendars/events/appointments', {
+            calendarId: booking.calendarId, locationId: g.locationId, contactId: event.leadId,
+            title: 'Avaliação', startTime: start, endTime, appointmentStatus: 'confirmed',
+            ignoreFreeSlotValidation: false, ignoreDateRange: false
+          });
+          if (!/^[A-Za-z0-9_-]{1,128}$/.test(data?.id ?? '') || data.calendarId !== booking.calendarId ||
+              data.locationId !== g.locationId || data.contactId !== event.leadId ||
+              Date.parse(data.startTime) !== Date.parse(start) || data.appointmentStatus !== 'confirmed') {
+            throw new Error('O CRM ainda não confirmou a reserva');
+          }
+          return data.id;
+        } catch (error) {
+          const status = error.response?.status;
+          const message = error.response?.data?.message;
+          if (status === 409 || (status === 400 && typeof message === 'string' &&
+              /(?:slot|time).*(?:unavailable|not available|already booked|no longer)/i.test(message))) {
+            throw new SlotUnavailable();
+          }
+          throw error;
+        }
+      },
       async qualify(event) {
         const { data } = await ghl.get('/opportunities/search', {
           params: { locationId: g.locationId, pipelineId: g.pipelineId,

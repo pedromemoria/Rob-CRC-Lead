@@ -1,7 +1,8 @@
 import { timingSafeEqual, verify } from 'node:crypto';
 import express from 'express';
 import { contactPhone, firstName, fullName } from './sales.js';
-import { hashWebhook } from './clinics.js';
+import { bookingCallbackToken } from './booking.js';
+import { hashWebhook, uuid } from './clinics.js';
 
 const id = /^[A-Za-z0-9_-]{1,128}$/;
 const numeric = /^[1-9]\d{0,14}$/;
@@ -68,6 +69,29 @@ export function ghlEvents(body, config) {
 
 export function webhooks(config, store, clinics) {
   const router = express.Router();
+  router.post('/agenda/:clinicaId', (req, res, next) => {
+    const id = req.params.clinicaId;
+    const authorization = req.get('Authorization') ?? '';
+    if (!uuid.test(id) || !equalSecret(authorization, 'Bearer ' + bookingCallbackToken(config.adminToken, id))) {
+      return res.sendStatus(401);
+    }
+    next();
+  }, express.json({ limit: '4kb', inflate: false }), async (req, res) => {
+    const { reference, appointmentId, status } = req.body ?? {};
+    if (typeof reference !== 'string' || !/^[a-f0-9]{32}$/.test(reference) || !valid(appointmentId) || status !== 'confirmed') {
+      return res.sendStatus(422);
+    }
+    const clinic = await clinics.routing(req.params.clinicaId);
+    if (!clinic?.crm_tipo) return res.sendStatus(404);
+    const booking = await store.confirmedLink(clinic.id, reference);
+    if (!booking) return res.sendStatus(404);
+    await store.enqueue([{
+      provider: clinic.crm_tipo, clinicId: clinic.id, account: clinic.crm_account_id,
+      leadId: booking.leadId, conversationId: booking.conversationId,
+      eventId: 'agenda-confirmada:' + reference, appointmentId: String(appointmentId), bookingConfirmation: true
+    }]);
+    res.sendStatus(202);
+  });
   router.post('/kommo/:clinicaId', async (req, res, next) => {
     if (!req.is('application/x-www-form-urlencoded')) return res.sendStatus(415);
     const token = req.query.token;

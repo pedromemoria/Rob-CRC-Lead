@@ -6,6 +6,7 @@ import { loadConfig } from './config.js';
 import { createStore } from './store.js';
 import { KnowledgeError } from './knowledge.js';
 import { createClinics } from './clinics.js';
+import { createAIProvider } from './ai-provider.js';
 import { createAgent } from './agent.js';
 import { createCrms } from './crm.js';
 import { createWorker } from './worker.js';
@@ -60,10 +61,12 @@ export async function start() {
       " EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sdr'" +
       " AND table_name = 'clinicas' AND column_name = 'crm_tipo' AND is_nullable = 'YES') AS draft_ready," +
       " EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('sdr.clinicas')" +
-      " AND conname='clinicas_configuracao_crm_erp') AS erp_ready"
+      " AND conname='clinicas_configuracao_crm_erp') AS erp_ready," +
+      " (SELECT count(*) = 2 FROM information_schema.columns WHERE table_schema='sdr'" +
+      " AND (table_name,column_name) IN (('clinicas','agenda_autonoma'),('history','agenda_ofertada'))) AS calendar_ready"
     );
     if (!Object.values(schema).every(Boolean)) {
-      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql, supabase/admin-saas.sql, supabase/contas-admin.sql, supabase/dados-clinicas.sql, supabase/cadastro-rapido.sql e supabase/agendamento-erp.sql no SQL Editor antes de iniciar.');
+      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql, supabase/admin-saas.sql, supabase/contas-admin.sql, supabase/dados-clinicas.sql, supabase/cadastro-rapido.sql, supabase/agendamento-erp.sql e supabase/agenda-autonoma.sql no SQL Editor antes de iniciar.');
     }
     clinics = createClinics(pool, config, fileURLToPath(new URL('../knowledge/', import.meta.url)));
   } catch (error) {
@@ -76,7 +79,7 @@ export async function start() {
   const feedback = createFeedback(pool);
   const sessions = createSessions(pool);
   const accounts = createAccounts(pool);
-  const decide = createAgent(config.openai);
+  const decide = createAgent(config.openai, createAIProvider(config));
   const worker = createWorker({
     store, documents, feedback, decide,
     integrationFor: clinics.integration, crmFor: createCrms

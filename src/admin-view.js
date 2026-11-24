@@ -1,3 +1,4 @@
+import { bookingFields } from './booking.js';
 import { minimumPasswordLength } from './accounts.js';
 import { contactFields, professionalFields, serviceFields, maxRows, maxObservations } from './clinic-data.js';
 import { trainingFields } from './clinics.js';
@@ -81,7 +82,7 @@ export function createClinicView({ attempted, csrf }) {
     '<footer class="form-footer"><button>Criar clínica</button></footer></form>';
 }
 
-export function connection({ clinic, attempted, csrf, webhook }) {
+export function connection({ clinic, attempted, csrf, webhook, bookingToken }) {
   const connected = Boolean(clinic.crm_tipo);
   const source = { ...clinic, ...attempted };
   const type = clinic?.crm_tipo ?? (source.crm_tipo === 'ghl' ? 'ghl' : 'kommo');
@@ -101,12 +102,23 @@ export function connection({ clinic, attempted, csrf, webhook }) {
       : '<p>Salve um segredo para exibir o link completo. Se ainda tiver o segredo atual, insira o mesmo valor para preservar o webhook já configurado.</p>') +
     '</section>' : '';
   const url = escape(adminUrl(clinic.id, 'conexao'));
+  const agenda = { ...clinic.agenda_autonoma, ...attempted };
+  const activeControl = connected ? '<form class="card" method="post" action="' +
+    escape(adminUrl(clinic.id, undefined, 'status')) + '">' + heading('Atendimento Autônomo Ativo') +
+    hidden('_csrf', csrf) + hidden('versao', clinic.versao) +
+    '<button type="submit" name="ativo" value="' + (clinic.ativo ? 'nao' : 'sim') + '">' +
+    (clinic.ativo ? 'Pausar atendimento' : 'Ativar atendimento') + '</button>' +
+    '<p class="muted">' + (clinic.ativo ? 'Ativo.' : 'Pausado.') + (clinic.agenda_autonoma?.calendarId || clinic.agenda_autonoma?.bookingLink ? '' : ' Configure a agenda abaixo para concluir reservas automaticamente.') + '</p></form>' : '';
   const version = hidden('versao', attempted?.versao ?? clinic.versao);
   const name = input(source, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"');
   const draftSettings = connected ? '' : '<form class="card form-card" method="post" action="' + url + '">' +
     heading('Nome da clínica') + hidden('_csrf', csrf) + version + hidden('configuracao', 'rascunho') + name +
     '<footer class="form-footer"><button>Salvar nome</button></footer></form>';
-  return webhookPanel + draftSettings + '<form class="card form-card" method="post" action="' + url + '">' +
+  const callback = connected && agenda.bookingLink ? '<section class="card">' + heading('Confirmações da agenda externa',
+    'Encaminhe a confirmação da agenda ao webhook para mover o card após uma reserva real.') +
+    '<p>Webhook <code>' + escape('/webhook/agenda/' + clinic.id) + '</code></p><details><summary>Token da agenda externa</summary>' +
+    '<code>' + escape(bookingToken) + '</code></details></section>' : '';
+  return activeControl + webhookPanel + draftSettings + callback + '<form class="card form-card" method="post" action="' + url + '">' +
     heading(connected ? 'Dados da conexão' : 'Conectar CRM', connected ? '' :
       'Preencha estes campos quando quiser habilitar o atendimento pelo CRM.') +
     hidden('_csrf', csrf) + version + (connected ? name : hidden('nome_clinica', clinic.nome_clinica)) + identity +
@@ -118,13 +130,11 @@ export function connection({ clinic, attempted, csrf, webhook }) {
       ' autocomplete="new-password" minlength="32" maxlength="128"') +
       '<small>Use de 32 a 128 caracteres URL-safe.</small></div>' : '') +
     input(source, 'funil_id', 'ID do funil', 'text', ' required') +
-    input(source, 'etapa_agendamento_id', 'ID da etapa de agendamento', 'text', ' required') +
+    input(source, 'etapa_agendamento_id', 'ID da etapa de agendamento (Agendado com agenda autônoma)', 'text', ' required') +
     input(source, 'responsavel_id', 'ID do responsável pelo transbordo', 'text', ' required') + '</div>' +
-    (connected ? '<div class="field clinic-toggle"><label for="ativo">Status do atendimento</label>' +
-      '<select id="ativo" name="ativo"><option value="sim"' +
-      (source.ativo === true || source.ativo === 'sim' ? ' selected' : '') + '>Ativa</option><option value="nao"' +
-      (source.ativo === false || source.ativo === 'nao' ? ' selected' : '') +
-      '>Inativa</option></select><small>Uma clínica inativa deixa de receber novos eventos para o robô.</small></div>' : '') +
+    heading('Agenda autônoma', 'Configure o calendário do GoHighLevel para confirmar reservas pela API ou informe o link público da clínica.') +
+    '<div class="fields">' + bookingFields.filter(([key]) => key === 'bookingLink' || !connected || type === 'ghl')
+      .map(([key, label, fieldType]) => input(agenda, key, label, fieldType)).join('') + '</div>' +
     '<footer class="form-footer"><button>' + (connected ? 'Salvar conexão' : 'Conectar CRM') + '</button></footer></form>';
 }
 
@@ -206,7 +216,7 @@ export function simulationClinicPicker(clinics, current) {
     options + '</select><button>Carregar simulador</button></div></form></section>';
 }
 
-export function tester(clinic, csrf) {
+export function tester(clinic, csrf, aiReady = false) {
   const action = clinic ? adminUrl(clinic.id, undefined, 'simular') : '/admin/simular?modo=rapido';
   return '<section class="card chat">' + heading('Simulador de atendimento', clinic
     ? 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.'
@@ -216,7 +226,8 @@ export function tester(clinic, csrf) {
     'Envie uma mensagem para iniciar o teste.</p></div><form data-simulator action="' +
     escape(action) + '">' + hidden('_csrf', csrf) +
     (clinic ? '' : input({}, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"')) +
-    '<div class="chat-options"><label class="toggle"><input type="checkbox" name="offline" checked> Simulação sem IA</label>' +
+    '<div class="chat-options"><label class="toggle"><input type="checkbox" name="offline"' +
+    (aiReady ? '' : ' checked') + '> Simulação sem IA</label>' +
     '<button class="secondary" type="button" data-reset>Limpar conversa</button></div>' +
     '<label for="mensagem">Mensagem do lead</label><div class="composer"><textarea id="mensagem" name="mensagem" ' +
     'placeholder="Ex.: Quais são os horários?" rows="2" maxlength="1000" required></textarea><button>Enviar</button></div>' +

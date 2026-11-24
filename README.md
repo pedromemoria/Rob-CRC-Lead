@@ -1,8 +1,10 @@
 # Rob-CRC-Lead
 
-Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 24 com Express, OpenAI e Supabase. Cada clínica usa uma conta CRM, seu próprio funil, equipe responsável e treinamento.
+Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 24 com Express, Gemini, OpenAI e Supabase. Cada clínica usa uma conta CRM, seu próprio funil, equipe responsável e treinamento.
 
 ## Atualizar o Supabase
+
+Aplique [supabase/agenda-autonoma.sql](supabase/agenda-autonoma.sql) após as demais migrações para persistir a configuração da agenda e as vagas oferecidas.
 
 Aplique [supabase/agendamento-erp.sql](supabase/agendamento-erp.sql) após as migrações abaixo para conectar o CRM sem precisar de um link de agendamento.
 
@@ -25,7 +27,8 @@ No serviço existente, abra **Environment**. Preencha estas três variáveis e c
 | Variável | Valor |
 | --- | --- |
 | `DATABASE_URL` | URI do Supabase em **Connect → Session pooler**, porta 5432, com a senha do banco. Copie a URI sem parâmetros SSL. O Node ativa TLS e verifica o certificado. |
-| `OPENAI_API_KEY` | Chave da API OpenAI. |
+| `GEMINI_API_KEY` | Chave do Google AI Studio. O robô usa `gemini-2.5-flash` como primeira opção. |
+| `OPENAI_API_KEY` | Contingência opcional. O serviço precisa de pelo menos uma das duas chaves. |
 | `ADMIN_TOKEN` | Segredo de 32 a 128 caracteres com letras, números, hífen ou sublinhado. Você pode gerar 64 caracteres hexadecimais com `openssl rand -hex 32`. |
 
 Abra `https://SEU-SERVICO.onrender.com/health` e confirme `{"status":"ok"}`. Em um Web Service configurado manualmente, use runtime Node, plano Free, branch main, `NODE_VERSION=24.x`, build `npm ci --omit=dev`, start `npm start` e Health Check Path `/health`. O serviço usa `PORT` do Render, com fallback para 3000.
@@ -100,6 +103,13 @@ O simulador e o atendimento real carregam o cadastro da clínica junto ao treina
 - Para uma simulação rápida, abra **Simular atendimento** no menu lateral e preencha apenas o nome da clínica. Esse teste usa respostas genéricas, sem criar cadastros ou acionar o CRM.
 - Para usar dados e treinamento salvos, selecione uma clínica cadastrada no simulador e mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI e verificar a aplicação dos feedbacks. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
 
+## Agenda autônoma
+
+- Use **Atendimento Autônomo Ativo** em **Conexão & CRM** para alternar o atendimento. Uma operação que já estiver em execução pode concluir.
+- No GoHighLevel, preencha o **ID do calendário**, o fuso IANA e a duração correspondente ao calendário. O token precisa de `calendars.readonly` e `calendars/events.write`, além dos escopos do CRM. Configure a etapa de destino como **Agendado**. O agente oferece até duas vagas reais, valida a escolha e confirma a reserva antes de mover a oportunidade.
+- Para Kommo ou GoHighLevel com agenda externa, preencha **Link público de reservas**. O serviço acrescenta `crc_ref` ao link. Configure a agenda ou sua automação para repassar essa referência quando houver reserva confirmada. Envie um POST JSON ao **Webhook de confirmações da agenda externa** mostrado no painel. Use `Authorization: Bearer TOKEN` com o token específico dessa clínica e o corpo `{"reference":"VALOR_DE_CRC_REF","appointmentId":"ID_DA_RESERVA","status":"confirmed"}`. Reenvios da mesma confirmação são deduplicados.
+- O simulador usa horários de exemplo e não escreve dados no CRM. Clínicas sem agenda configurada continuam com encaminhamento à equipe. O atendimento usa o histórico que ainda está disponível, com limite de contexto para o provedor e retenção de até 30 dias.
+
 ## Atendimento consultivo
 
 O robô aplica SPIN Selling para entender a situação, acolher o incômodo, perguntar pelo impacto na rotina e propor uma avaliação. Cada mensagem tem no máximo uma pergunta. Dúvidas sobre informações cadastradas podem ser respondidas diretamente, e o interesse em agendar interrompe as perguntas de descoberta.
@@ -108,7 +118,7 @@ Para preços, cadastre o serviço, o valor ou faixa e o que está incluso em **I
 
 ## Operar o agente
 
-- **Resposta.** O GPT-4o escolhe uma resposta aprovada ou solicita transbordo. O servidor conduz a qualificação para agendamento. O servidor só aceita uma ferramenta por mensagem e produz a saída usando frases fixas ou publicadas. Para pedidos de avaliação conhecidos, há também redirecionamento programático para a sessão.
+- **Resposta.** O Gemini, com contingência da OpenAI, escolhe uma resposta aprovada, formula um acolhimento breve ou indica transbordo. O servidor conduz a qualificação para agendamento. O servidor só aceita uma ferramenta por mensagem e produz a saída usando frases fixas ou publicadas. Para pedidos de avaliação conhecidos, há também redirecionamento programático para a sessão.
 - **Agendamento.** A decisão requer evidência literal da mensagem atual, validada pelo servidor. Um aceite curto exige oferta de agenda no turno anterior da mesma conversa. Se faltar o objetivo em um pedido genérico, o robô pergunta qual especialidade ou tipo de consulta o lead procura. Ao aceitar a avaliação, o lead escolhe manhã ou tarde. O robô pede nome completo e telefone ou WhatsApp se ainda faltarem, um por mensagem. Em seguida, move a oportunidade no CRM quando possível, pausa a conversa, cria uma tarefa com o turno preferido e os dados informados e avisa o lead do encaminhamento. A equipe confirma os horários e registra o agendamento no ERP.
 - **Transbordo.** Ao detectar pedido de humano, irritação, assunto totalmente fora do escopo, descadastro ou evento sem texto, o servidor pausa o lead e cria tarefa atribuída no CRM. A equipe assume a conversa. Para voltar à IA, selecione a clínica em `/admin/operacao`. A reativação limpa o contexto da conversa e descarta mensagens enfileiradas durante a pausa.
 - **Falhas.** O webhook retorna sucesso após gravar o evento na fila. A fila deduplica por clínica, provedor, conta e ID da mensagem. Etapas concluídas ficam registradas antes do próximo efeito. Quando a criação de uma mensagem ou tarefa tem resultado incerto, confira o CRM em `/admin/operacao` antes de escolher **Tentar novamente**. Se o CRM já registrou o efeito ou a equipe decidiu assumir, escolha **Encerrar evento**. Um evento pendente impede que eventos seguintes do mesmo lead avancem e permite que outros leads continuem.

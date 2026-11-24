@@ -1,7 +1,8 @@
+import { SlotUnavailable, availableOptions, chosenOption, externalBookingLink, slotMessage } from './booking.js';
 import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
-import { bookingHandoffReply, handoffReasons, mentionsOnlineBooking } from './agent.js';
+import { bookingHandoffReply, explicitHandoff, handoffReasons, mentionsOnlineBooking, normalize, wantsAssessment } from './agent.js';
 import { closingContext, mentionsPrice, validSalesReply } from './sales.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
@@ -15,30 +16,90 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
   let active;
   let nextPrune = 0;
 
+  async function offerSlots(store, job, crm, booking, turn, prefix = '') {
+    const options = availableOptions(await crm.slots(booking), booking, turn);
+    const text = options.length ? prefix + slotMessage(options)
+      : prefix + 'No momento não encontrei horários disponíveis. Você pode tentar novamente mais tarde.';
+    await store.plan(job, { kind: 'booking_message', text,
+      bookingOffer: options.length ? { calendarId: booking.calendarId, options, turn } : null }, 'send');
+  }
+
   async function processJob(store, job) {
-    if (!job.plan && await store.paused(job.clinica_id, job.lead)) return store.finish(job);
+    if (!job.event.bookingConfirmation && !job.plan && await store.paused(job.clinica_id, job.lead)) return store.finish(job);
     const integration = await integrationFor(job.clinica_id);
     if (integration.provider !== job.event.provider) throw new ClinicError('O CRM do evento não corresponde à clínica.');
     const crm = crmFor(integration)[job.event.provider];
+    const booking = integration.booking ?? {};
+    if (job.event.bookingConfirmation) {
+      await crm.qualify(job.event);
+      return store.finish(job);
+    }
     const officialReplies = new Set(clinicFacts(integration.knowledge.clinicData).values());
     const allowed = text => validSalesReply(text) && !mentionsOnlineBooking(text) &&
       (officialReplies.has(text) || (!mentionsPrice(text) && safeReply(text)));
     const needsDecision = !job.plan || (job.plan.kind === 'responder' && !allowed(job.plan.text));
     if (needsDecision) {
       const history = await store.history(job);
-      const search = [job.event.text, history.at(-1)?.inbound].filter(Boolean).join(' ');
-      const [references, corrections] = await Promise.all([
-        documents?.context(job.clinica_id, search) ?? [], feedback?.list(job.clinica_id) ?? []
-      ]);
-      const decision = await decide(job.event, history, {
-        ...integration.knowledge, references, feedback: corrections.map(row => row.conteudo)
-      });
-      if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
-      else if (decision.kind === 'qualificar_agendamento') await store.plan(job, decision, 'qualify');
-      else {
-        if (!allowed(decision.text)) throw new KnowledgeError('Resposta inválida');
-        await store.plan(job, decision, 'send');
+      const lead = normalize(job.event.text);
+      const pending = history.at(-1)?.agenda_ofertada;
+      if (booking.calendarId && pending && !explicitHandoff(lead) && !wantsAssessment(lead) &&
+          !/\b(?:vou pensar|nao quero|desisti|outra hora)\b/.test(lead)) {
+        if (pending.calendarId !== booking.calendarId) {
+          await offerSlots(store, job, crm, booking, pending.turn, 'A agenda foi atualizada. ');
+        } else {
+          const picked = chosenOption(job.event.text, pending.options);
+          if (picked >= 0) {
+            await store.plan(job, { kind: 'book', slot: pending.options[picked], turn: pending.turn,
+              calendarId: pending.calendarId }, 'book');
+          } else {
+            const prompt = pending.options.length === 1 ? 'Responda 1 para escolher o horário.' : 'Responda 1 ou 2 para indicar sua preferência.';
+            await store.plan(job, { kind: 'booking_message',
+              text: history.at(-1).outbound === prompt ? slotMessage(pending.options) : prompt,
+              bookingOffer: pending }, 'send');
+          }
+        }
+      } else {
+        const search = [job.event.text, history.at(-1)?.inbound].filter(Boolean).join(' ');
+        const [references, corrections] = await Promise.all([
+          documents?.context(job.clinica_id, search) ?? [], feedback?.list(job.clinica_id) ?? []
+        ]);
+        const decision = await decide(job.event, history, {
+          ...integration.knowledge, references, feedback: corrections.map(row => row.conteudo)
+        });
+        if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
+        else if (decision.kind === 'qualificar_agendamento') {
+          if (booking.calendarId) await offerSlots(store, job, crm, booking, decision.turn);
+          else if (booking.bookingLink) {
+            const externalRef = job.id.slice(0, 32);
+            await store.plan(job, { kind: 'booking_message',
+              text: 'Você pode escolher um horário e confirmar sua consulta na agenda da clínica:\n' +
+                externalBookingLink(booking.bookingLink, externalRef),
+              bookingOffer: { externalRef, leadId: job.event.leadId, conversationId: job.event.conversationId } }, 'send');
+          }
+          else await store.plan(job, decision, 'qualify');
+        } else {
+          if (!allowed(decision.text)) throw new KnowledgeError('Resposta inválida');
+          await store.plan(job, decision, 'send');
+        }
       }
+    }
+    if (job.step === 'book') {
+      const { slot, calendarId, turn } = job.plan;
+      if (!booking.calendarId) throw new ClinicError('O calendário de agendamento foi removido.');
+      try {
+        if (calendarId !== booking.calendarId || Date.parse(slot.start) <= Date.now() ||
+            !(await crm.slots(booking)).some(value => Date.parse(value) === Date.parse(slot.start))) throw new SlotUnavailable();
+        await store.startEffect(job);
+        const appointmentId = await crm.book(job.event, booking, slot.start);
+        await store.plan(job, { ...job.plan, appointmentId }, 'booked_stage');
+      } catch (error) {
+        if (!(error instanceof SlotUnavailable)) throw error;
+        await offerSlots(store, job, crm, booking, turn, 'Esse horário não está mais disponível. ');
+      }
+    }
+    if (job.step === 'booked_stage') {
+      await crm.qualify(job.event);
+      await store.plan(job, { kind: 'booking_message', text: 'Sua avaliação está confirmada para ' + job.plan.slot.text + '.' }, 'send');
     }
     if (job.step === 'qualify') {
       try {

@@ -48,6 +48,13 @@ export function createStore(database) {
         [JSON.stringify(events.map(event => ({ id: eventKey(event), lead: leadKey(event), event, clinica_id: event.clinicId })))]
       );
     },
+    async confirmedLink(clinicId, reference) {
+      const { rows } = await database.query(
+        "SELECT agenda_ofertada FROM sdr.history WHERE clinica_id=$1 AND agenda_ofertada->>'externalRef'=$2 LIMIT 1",
+        [clinicId, reference]
+      );
+      return rows[0]?.agenda_ofertada ?? null;
+    },
     async claim() {
       const { rows } = await database.query(
         "UPDATE sdr.jobs SET state = 'running' WHERE seq = (" +
@@ -74,8 +81,8 @@ export function createStore(database) {
     },
     async history(job) {
       const { rows } = await database.query(
-        'SELECT inbound,outbound,offered FROM sdr.history WHERE lead = $1 AND conversation = $2 AND clinica_id = $3' +
-        " AND inserted >= now() - interval '30 days' ORDER BY seq DESC LIMIT 12",
+        'SELECT inbound,outbound,offered,agenda_ofertada FROM sdr.history WHERE lead = $1 AND conversation = $2 AND clinica_id = $3' +
+        " AND inserted >= now() - interval '30 days' ORDER BY seq DESC",
         [job.lead, job.event.conversationId, job.clinica_id]
       );
       return rows.reverse();
@@ -89,13 +96,10 @@ export function createStore(database) {
         if (outbound) {
           const conversation = job.event.conversationId;
           await client.query(
-            'INSERT INTO sdr.history(seq,lead,conversation,inbound,outbound,offered,clinica_id) VALUES($1,$2,$3,$4,$5,$6,$7)',
-            [job.seq, job.lead, conversation, job.event.text, outbound, Boolean(job.plan?.offer), job.clinica_id]
-          );
-          await client.query(
-            'DELETE FROM sdr.history WHERE lead = $1 AND conversation = $2 AND clinica_id = $3 AND seq NOT IN (' +
-            ' SELECT seq FROM sdr.history WHERE lead = $1 AND conversation = $2 AND clinica_id = $3 ORDER BY seq DESC LIMIT 12)',
-            [job.lead, conversation, job.clinica_id]
+            'INSERT INTO sdr.history(seq,lead,conversation,inbound,outbound,offered,clinica_id,agenda_ofertada)' +
+            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+            [job.seq, job.lead, conversation, job.event.text, outbound, Boolean(job.plan?.offer), job.clinica_id,
+              job.plan?.bookingOffer ?? null]
           );
         }
         await client.query(clear + ' WHERE seq = $1', [job.seq]);

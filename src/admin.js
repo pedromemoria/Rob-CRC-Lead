@@ -7,6 +7,7 @@ import { DocumentError, extractDocument, uploadBytes } from './documents.js';
 import { minimumPasswordLength, normalizedEmail, validEmail } from './accounts.js';
 import { adminAuth, loginLimit } from './admin-auth.js';
 import { ClinicDataError, clinicDataFromForm, validateClinicData } from './clinic-data.js';
+import { bookingCallbackToken } from './booking.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
 import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, createClinicView, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
@@ -27,7 +28,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
   });
   router.use('/assets', express.static(fileURLToPath(new URL('./admin-assets/', import.meta.url)), { maxAge: 0, index: false }));
   const form = express.urlencoded({ extended: false, limit: '256kb', parameterLimit: 24, inflate: false });
-  const json = express.json({ limit: '64kb', inflate: false });
+  const json = express.json({ limit: '128kb', inflate: false });
   const upload = multer({ storage: multer.memoryStorage(), limits: {
     fileSize: uploadBytes, files: 1, fields: 1, parts: 3, fieldSize: 1024
   } }).single('arquivo');
@@ -138,8 +139,9 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       body = clinicDataView({ clinic, draft: attempted, csrf, version });
     } else if (active === 'teste') {
       const simulationClinic = req.query.modo === 'rapido' ? null : clinic;
-      body = tester(simulationClinic, csrf) + (member ? '' : simulationClinicPicker(rows, simulationClinic));
-    } else if (clinic) body = connection({ clinic, attempted, csrf, webhook: await clinics.webhookPath(clinic) });
+      body = tester(simulationClinic, csrf, Boolean(config.geminiKey || config.openai?.apiKey)) + (member ? '' : simulationClinicPicker(rows, simulationClinic));
+    } else if (clinic) body = connection({ clinic, attempted, csrf, webhook: await clinics.webhookPath(clinic),
+      bookingToken: bookingCallbackToken(config.adminToken, clinic.id) });
     else body = createClinicView({ attempted, csrf });
     res.status(status).type('html').send(layout({
       clinics: rows, current: clinic, active, csrf, member, content: notice(message, status >= 400) + body
@@ -154,6 +156,13 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     message: Object.hasOwn(messages, req.query.salvo) ? messages[req.query.salvo] : ''
   }));
   const dataForm = express.urlencoded({ extended: false, limit: '192kb', parameterLimit: 220, inflate: false });
+  router.post('/status', form, protect, selected, requireClinic, async (req, res) => {
+    const clinic = res.locals.clinic;
+    const { ativo, versao } = req.body ?? {};
+    if (!['sim', 'nao'].includes(ativo) || String(clinic.versao) !== versao ||
+        !await clinics.setActive(clinic, ativo === 'sim')) return res.sendStatus(409);
+    res.redirect(303, adminUrl(clinic.id, 'conexao'));
+  });
   router.post('/dados', dataForm, protect, selected, requireClinic, async (req, res) => {
     const clinic = res.locals.clinic;
     const version = req.body?.versao;
@@ -279,12 +288,12 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       knowledge = { clinicName: name, files: {}, replies: new Map(), references: [] };
     }
     try {
-      res.json(await simulate({ text: text.trim(), history, withAI, decide, knowledge }));
+      res.json(await simulate({ text: text.trim(), history, withAI, decide, knowledge, booking: clinic?.agenda_autonoma }));
     } catch (error) {
       if (!withAI) throw error;
       const message = [401, 403, 429].includes(error.status)
-        ? 'A OpenAI recusou a chamada. Confira a chave, os créditos ou os limites e use a simulação sem IA para testar.'
-        : 'Não foi possível consultar a OpenAI. Tente novamente ou use a simulação sem IA.';
+        ? 'O provedor de IA recusou a chamada. Confira as chaves, os créditos e os limites ou teste no modo sem IA.'
+        : 'Não foi possível consultar os provedores de IA. Tente novamente ou use a simulação sem IA.';
       res.status(502).json({ error: message });
     }
   });

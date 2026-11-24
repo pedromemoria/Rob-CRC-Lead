@@ -1,6 +1,7 @@
 import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, handoffReasons, bookingHandoffReply, replies } from './agent.js';
 import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
 import { consultativeDecision, consultativeFallback, nonRepeatingDecision } from './sales.js';
+import { availableOptions, chosenOption, slotMessage } from './booking.js';
 import { terms } from './documents.js';
 
 const words = text => terms(normalize(text));
@@ -29,16 +30,35 @@ function offline(text, history, knowledge) {
 }
 
 export function validHistory(history) {
-  return Array.isArray(history) ? history.slice(-12).filter(turn =>
+  return Array.isArray(history) ? history.slice(-80).filter(turn =>
     typeof turn?.inbound === 'string' && typeof turn?.outbound === 'string'
   ).map(turn => ({
-    inbound: turn.inbound.slice(0, 1000), outbound: turn.outbound.slice(0, 2500), offered: turn.offered === true
+    inbound: turn.inbound.slice(0, 1000), outbound: turn.outbound.slice(0, 2500), offered: turn.offered === true,
+    agenda_ofertada: Array.isArray(turn.agenda_ofertada) ? turn.agenda_ofertada.slice(0, 2).filter(option =>
+      typeof option?.text === 'string' && option.text.length <= 120 && Number.isFinite(Date.parse(option.start))) : null
   })) : [];
 }
 
-export async function simulate({ text, history, withAI, knowledge, decide }) {
+export async function simulate({ text, history, withAI, knowledge, decide, booking = {} }) {
+  const pending = booking.calendarId && history.at(-1)?.agenda_ofertada;
+  if (pending?.length && !explicitHandoff(normalize(text))) {
+    const index = chosenOption(text, pending);
+    if (index >= 0) return { reply: 'Reserva simulada para ' + pending[index].text + '.',
+      action: 'Simular alteração para Agendado', offered: false, sources: [], feedbackCount: 0 };
+  }
   const decision = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
   const result = nonRepeatingDecision(decision, history);
+  if (result.kind === 'qualificar_agendamento' && booking.calendarId) {
+    const now = Date.now();
+    const exampleSlots = [1, 2].map(days => new Date(now + days * 86_400_000).toISOString());
+    const options = availableOptions(exampleSlots, booking, result.turn, now);
+    return { reply: 'Horários de exemplo. ' + slotMessage(options), action: 'Escolher horário simulado',
+      agenda_ofertada: options, offered: false, sources: [], feedbackCount: 0 };
+  }
+  if (result.kind === 'qualificar_agendamento' && booking.bookingLink) {
+    return { reply: 'No atendimento, o robô enviaria o link da agenda da clínica.', action: 'Simular envio do link',
+      offered: false, sources: [], feedbackCount: 0 };
+  }
   let reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply
     : result.kind === 'transbordo_humano' ? 'Vou encaminhar sua conversa para a equipe.' : result.text;
   if (result.kind !== 'responder' && reply === history.at(-1)?.outbound) {

@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
+import { parseBooking } from './booking.js';
 import { KnowledgeError, parseKnowledge } from './knowledge.js';
 
 export const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -9,7 +10,7 @@ const numeric = /^[1-9]\d{0,14}$/;
 const externalId = /^[A-Za-z0-9_-]{1,128}$/;
 const webhookSecret = /^[A-Za-z0-9_-]{32,128}$/;
 const columns = 'id,nome_clinica,crm_tipo,crm_account_id,kommo_conta_id,funil_id,etapa_agendamento_id,' +
-  'responsavel_id,regras_negocio,quebra_objecoes,faq,versao,ativo,dados_publicos';
+  'responsavel_id,regras_negocio,quebra_objecoes,faq,versao,ativo,dados_publicos,agenda_autonoma';
 
 export class ClinicError extends Error {}
 
@@ -186,7 +187,15 @@ export function createClinics(database, config, templateDir) {
         ? { kommo: { subdomain: row.crm_account_id, token: raw, pipelineId: Number(row.funil_id),
           stageId: Number(row.etapa_agendamento_id), assignee: Number(row.responsavel_id) } }
         : { ghl: { ...common, locationId: row.crm_account_id, version: config.ghl.version } };
-      return { ...crm, provider: row.crm_tipo, knowledge: clinicKnowledge(row) };
+      return { ...crm, provider: row.crm_tipo, booking: row.agenda_autonoma, knowledge: clinicKnowledge(row) };
+    },
+    async setActive(clinic, active) {
+      if (!clinic.crm_tipo) return false;
+      const result = await database.query(
+        'UPDATE sdr.clinicas SET ativo=$1,versao=versao+1 WHERE id=$2 AND versao=$3',
+        [active, clinic.id, clinic.versao]
+      );
+      return result.rowCount === 1;
     },
     async saveData(clinicId, version, data) {
       if (typeof version !== 'string' || !/^[1-9][0-9]{0,9}$/.test(version) || Number(version) > 2_147_483_646) return false;
@@ -198,6 +207,9 @@ export function createClinics(database, config, templateDir) {
     },
     async save(form, current = null) {
       const { clinic, token, webhookHash, webhookSecret } = parseSettings(form, current);
+      let booking;
+      try { booking = parseBooking(form, clinic.crm_tipo); }
+      catch (error) { throw new ClinicError(error.message); }
       const encrypted = token ? encrypt(token, clinic.id) : null;
       const encryptedWebhook = webhookSecret ? encrypt(webhookSecret, clinic.id + ':webhook') : null;
       const editable = [clinic.nome_clinica, clinic.funil_id, clinic.etapa_agendamento_id,
@@ -210,17 +222,17 @@ export function createClinics(database, config, templateDir) {
             'regras_negocio=$5,quebra_objecoes=$6,faq=$7,' +
             'crm_token=COALESCE($8,crm_token),webhook_token_hash=COALESCE($9,webhook_token_hash),versao=versao+1,' +
             'webhook_token_cifrado=COALESCE($12,webhook_token_cifrado),ativo=$13,crm_tipo=$14,crm_account_id=$15,' +
-            'kommo_conta_id=$16 WHERE id=$10 AND versao=$11',
+            'kommo_conta_id=$16,agenda_autonoma=COALESCE($17,agenda_autonoma) WHERE id=$10 AND versao=$11',
             [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook, clinic.ativo,
-              clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id]
+              clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, booking ? JSON.stringify(booking) : null]
           );
           if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
         } else {
           await database.query(
             'INSERT INTO sdr.clinicas(nome_clinica,funil_id,etapa_agendamento_id,responsavel_id,' +
-            'regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_cifrado,ativo)' +
-            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
-            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, encryptedWebhook, clinic.ativo]
+            'regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_cifrado,ativo,agenda_autonoma)' +
+            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',
+            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, encryptedWebhook, clinic.ativo, JSON.stringify(booking ?? {})]
           );
         }
       } catch (error) {

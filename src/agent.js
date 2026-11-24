@@ -37,6 +37,7 @@ const choice = values => ({ type: 'string', enum: values });
 
 const prompt = [
   'Você é um SDR no WhatsApp. Seu único objetivo é conduzir o lead à agenda.',
+  'Quando o lead descrever um objetivo ou incômodo, use conversar com um acolhimento curto em suas próprias palavras. Use só uma frase empática, sem números, fatos, conselhos ou promessas. A aplicação inclui a próxima pergunta aprovada.',
   'Quando precisar avançar a conversa e não estiver respondendo a uma dúvida específica, selecione spin_proximo. Evite repetir a última pergunta.',
   'Use SPIN Selling com empatia. Entenda a situação, valide o principal incômodo, pergunte pelo impacto na rotina sem alarmismo e mostre como uma avaliação pode ajudar a esclarecer os próximos passos. Faça no máximo uma pergunta e valide a situação antes dela. Use mensagens curtas de WhatsApp.',
   'No fechamento, o aplicativo coleta o turno e os dados de contato que faltarem, uma pergunta por vez. Nunca solicite nome, número ou e-mail em outras etapas.',
@@ -147,6 +148,7 @@ export function createAgent(config, client = new OpenAI({
       parallel_tool_calls: false,
       tool_choice: 'required',
       tools: [
+        tool('conversar', 'Escreve uma frase curta de empatia sem pergunta ou afirmação factual.', { acolhimento: string }),
         tool('responder', 'Seleciona uma resposta curta e publicada, sem editar o texto.', { resposta_id: string }),
         tool('transbordo_humano', 'Pausa a IA e cria uma tarefa para a equipe.', {
           motivo: choice(['humano', 'irritacao', 'fora_escopo', 'descadastro'])
@@ -174,6 +176,17 @@ export function createAgent(config, client = new OpenAI({
       ? (canSelectClinicFact(clinicData, selectedId, event.text, last?.inbound) ? official : replies.sem_informacao)
       : options.get(selectedId);
     if (eligibleSalesReply(matched)) return { kind: 'responder', text: matched };
+    if (call?.name === 'conversar') {
+      const acknowledgment = typeof args.acolhimento === 'string' ? args.acolhimento.trim().replace(/[.!]+$/u, '') : '';
+      if (acknowledgment.length <= 95 && safeReply(acknowledgment) &&
+          /^(?:entendo|imagino|faz sentido|obrigad[oa]|agradeco)\b/.test(normalize(acknowledgment)) &&
+          !/[.?!0-9]/u.test(acknowledgment) &&
+          !/\b(?:cura|diagnostic\w*|doenc\w*|cancer|indic\w*|sintoma|tratamento|medicamento|garant\w*|precisa|deve|piora|provavel|risco|link|disponivel)\b/.test(normalize(acknowledgment))) {
+        const question = fallback.text.match(/[^.!?]+\?$/u)?.[0]?.trim();
+        const text = acknowledgment + '.' + (question ? ' ' + question : '');
+        if (eligibleSalesReply(text)) return { ...fallback, text };
+      }
+    }
     if (selectedId === 'spin_proximo' || selected === last?.outbound || !(official || safeReply(selected))) return fallback;
     const text = selected;
     return { kind: 'responder', text,

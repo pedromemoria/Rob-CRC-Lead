@@ -28,7 +28,7 @@ export function preferredTurn(text) {
 export function validSalesReply(text) {
   return typeof text === 'string' && text.trim() && text.length <= 320 &&
     text.split(/\r?\n/).length <= 4 && (text.match(/\?/g)?.length ?? 0) <= 1 &&
-    (!text.includes('?') || /^(?:oi|ola|entend[oi]|faz sentido|claro|com certeza|obrigad[oa]|agradeco)\b/.test(normalize(text))) &&
+    (!text.includes('?') || /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|com certeza|obrigad[oa]|agradeco)\b/.test(normalize(text))) &&
     !/\b(?:pre[- ]?reserv\w*|(?:horarios?|vagas?) (?:acabando|limitad[oa]s?)|(?:temos|tenho) (?:vaga|disponibilidade|horario)|garant\w* (?:cura|resultado))\b/.test(normalize(text));
 }
 
@@ -126,11 +126,17 @@ export function nonRepeatingDecision(decision, history) {
 }
 
 export function modelHistory(history) {
-  return history.map((turn, index) => {
+  const result = history.map((turn, index) => {
     const previous = history[index - 1]?.outbound;
     const closingContact = closingPrompts.nome.includes(previous) || closingPrompts.telefone.includes(previous);
     return { lead: closingContact ? '[dado de contato para agendamento]' : turn.inbound, sdr: turn.outbound };
   });
+  let chars = 0;
+  return result.reverse().filter(turn => {
+    const size = (turn.lead?.length ?? 0) + (turn.sdr?.length ?? 0);
+    chars += size;
+    return chars <= 80_000;
+  }).reverse();
 }
 
 export function closingContext(plan) {
@@ -207,7 +213,8 @@ export function consultativeFallback(history, lead, message = '') {
     : 'Oi! Como posso ajudar?');
   const phases = [salesReplies.situacao, problem, salesReplies.impacto, salesReplies.necessidade];
   const furthest = history.reduce((phase, turn) => {
-    const index = turn.outbound?.startsWith('Entendi que você busca atendimento em ') ? 1 : phases.indexOf(turn.outbound);
+    const exact = phases.findIndex(text => turn.outbound?.endsWith(text.match(/[^.!?]+\?$/u)?.[0]?.trim() ?? text));
+    const index = turn.outbound?.startsWith('Entendi que você busca atendimento em ') || exact === 1 ? 1 : exact;
     return Math.max(phase, index);
   }, -1);
   return response(phases[goal && furthest < 0 ? 1 : furthest + 1] ??

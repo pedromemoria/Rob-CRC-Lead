@@ -16,9 +16,11 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
 import { createWorker } from '../src/worker.js';
+import { createAIProvider } from '../src/ai-provider.js';
+import { bookingCallbackToken } from '../src/booking.js';
 import { salesReplies } from '../src/sales.js';
 import { bookingHandoffReply, createAgent, replies } from '../src/agent.js';
-import { simulate } from '../src/simulator.js';
+import { simulate, validHistory } from '../src/simulator.js';
 import { createApp } from '../src/server.js';
 import { createCrms, OpportunityError } from '../src/crm.js';
 
@@ -46,6 +48,7 @@ async function database(dataDir, migrate = true) {
     await db.exec(readFileSync(new URL('../supabase/dados-clinicas.sql', import.meta.url), 'utf8'));
     await db.exec(readFileSync(new URL('../supabase/cadastro-rapido.sql', import.meta.url), 'utf8'));
     await db.exec(readFileSync(new URL('../supabase/agendamento-erp.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/agenda-autonoma.sql', import.meta.url), 'utf8'));
   }
   return {
     query: client.query,
@@ -892,4 +895,122 @@ test('aceites curtos retomam o fechamento, pedem dados um por vez e não repetem
   assert.notEqual(noAcceptance.text, salesReplies.turno);
   const noBookingGoal = await simulate({ text: 'Eu procuro atendimento em urologia', history: [], withAI: false, knowledge });
   assert.match(noBookingGoal.reply, /busca atendimento em urologia/);
+});
+
+test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principal falha', async () => {
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'ai')), feedback: ['Atenda com empatia.'],
+    references: [{ nome: 'Guia.pdf', trecho: 'Atendimento da clínica.' }] };
+  let responseStatus = 200;
+  let calls = 0;
+  let fallbackCalls = 0;
+  const fetcher = async (url, request) => {
+    calls++;
+    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    assert.equal(request.headers['x-goog-api-key'], 'gemini-for-test');
+    const body = JSON.parse(request.body);
+    const context = JSON.parse(body.contents[0].parts[0].text);
+    assert.deepEqual(context.feedbacks_da_clinica, ['Atenda com empatia.']);
+    assert.equal(context.documentos_de_referencia[0].nome, 'Guia.pdf');
+    assert.equal(context.historico.length, 20);
+    assert.equal(body.toolConfig.functionCallingConfig.mode, 'ANY');
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [
+      { functionCall: { name: 'conversar', args: { acolhimento: 'Entendo que encontrar o atendimento certo seja importante para você' } } }
+    ] } }] }), { status: responseStatus });
+  };
+  const fallback = { chat: { completions: { async create() {
+    fallbackCalls++;
+    return modelResult('responder', { resposta_id: 'acolher' });
+  } } } };
+  const config = { geminiKey: 'gemini-for-test', openai: { model: 'gpt-4o' } };
+  const decide = createAgent(config.openai, createAIProvider(config, { fetcher, fallback }));
+  const history = Array.from({ length: 20 }, () => ({ inbound: 'Estou pesquisando', outbound: 'Entendi.' }));
+  const primary = await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge);
+  assert.match(primary.text, /encontrar o atendimento certo/);
+  assert.equal(fallbackCalls, 0);
+  responseStatus = 429;
+  assert.equal((await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge)).text, replies.acolher);
+  assert.equal(calls, 2);
+  assert.equal(fallbackCalls, 1);
+  const onlyGemini = createAgent(config.openai, createAIProvider(config, { fetcher }));
+  await assert.rejects(onlyGemini({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge),
+    error => error.status === 429);
+});
+
+test('GoHighLevel reserva um horário verificado e atualiza a oportunidade uma única vez', async t => {
+  const { clinics, store } = await fixture(t);
+  const id = await clinics.save(clinicForm('ghl', 'calendar', { calendarId: 'cal123', duration: '30', timezone: 'America/Fortaleza' }));
+  const starts = [new Date(Date.now() + 86_400_000).toISOString(), new Date(Date.now() + 172_800_000).toISOString()];
+  const events = [];
+  const crmFor = config => createCrms(config, () => ({
+    async get(path) {
+      if (path === '/calendars/cal123/free-slots') return { data: { '2027-01-02': { slots: starts } } };
+      assert.equal(path, '/opportunities/search');
+      return { data: { opportunities: [{ id: 'opp', locationId: 'calendar', pipelineId: '8', status: 'open',
+        contactId: '99', pipelineStageId: 'old' }] } };
+    },
+    async put(path, payload) { events.push(['stage', path, payload]); return { data: {} }; },
+    async post(path, payload) {
+      if (path === '/calendars/events/appointments') {
+        events.push(['book', payload]);
+        return { data: { id: 'appointment', ...payload } };
+      }
+      assert.equal(path, '/conversations/messages');
+      events.push(['send', payload.message]);
+      return { data: {} };
+    }
+  }));
+  const worker = createWorker({ store, integrationFor: clinics.integration, crmFor,
+    decide: async () => ({ kind: 'qualificar_agendamento', turn: 'tarde' }) });
+  await store.enqueue([event('find', id, 'calendar')]);
+  await worker.tick();
+  assert.match(events[0][1], /1\..*\n2\./);
+  await store.enqueue([event('choose', id, 'calendar', '1')]);
+  await worker.tick();
+  assert.deepEqual(events.map(x => x[0]), ['send', 'book', 'stage', 'send']);
+  assert.equal(events[1][1].ignoreFreeSlotValidation, false);
+  assert.equal(events[1][1].contactId, '99');
+  assert.match(events[3][1], /confirmada/);
+  assert.equal(await store.paused(id, leadKey(event('choose', id, 'calendar'))), false);
+});
+
+test('agenda externa só move o card após confirmação autenticada e correlacionada', async t => {
+  const { clinics, store, db } = await fixture(t);
+  const id = await clinics.save(clinicForm('kommo', 'example', { bookingLink: 'https://reservas.example.org/agenda' }));
+  const steps = [];
+  const worker = createWorker({ store, integrationFor: clinics.integration,
+    crmFor: () => ({ kommo: { send: async (_, text) => steps.push(text), qualify: async () => steps.push('movido') } }),
+    decide: async () => ({ kind: 'qualificar_agendamento' }) });
+  await store.enqueue([{ ...event('external', id, 'example'), provider: 'kommo' }]);
+  await worker.tick();
+  assert.equal(steps.length, 1);
+  const reference = new URL(steps[0].split('\n').at(-1)).searchParams.get('crc_ref');
+  const server = createApp({ adminToken, ghl: {} }, store, clinics, {
+    documents: createDocuments(db), feedback: createFeedback(db), sessions: createSessions(db)
+  }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const url = 'http://127.0.0.1:' + server.address().port + '/webhook/agenda/' + id;
+  const token = bookingCallbackToken(adminToken, id);
+  const confirm = (header, ref = reference) => fetch(url, { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + header },
+    body: JSON.stringify({ reference: ref, appointmentId: 'appt-01', status: 'confirmed' })
+  });
+  assert.equal((await confirm('invalid')).status, 401);
+  assert.equal((await confirm(token, 'a'.repeat(32))).status, 404);
+  assert.equal((await confirm(token)).status, 202);
+  assert.equal((await confirm(token)).status, 202);
+  await worker.tick();
+  await worker.tick();
+  assert.deepEqual(steps.slice(1), ['movido']);
+});
+
+test('simulador aceita a escolha entre dois horários fictícios', async () => {
+  const booking = { calendarId: 'test', timezone: 'America/Fortaleza', duration: 30 };
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'sim-agenda')), references: [] };
+  const decide = async () => ({ kind: 'qualificar_agendamento', turn: 'manhã' });
+  const offer = await simulate({ text: 'Dados completos', history: [], knowledge, withAI: true, decide, booking });
+  assert.equal(offer.agenda_ofertada.length, 2);
+  const history = validHistory([{ inbound: 'Dados completos', outbound: offer.reply, agenda_ofertada: offer.agenda_ofertada }]);
+  const selection = await simulate({ text: '2', history, knowledge, withAI: false, booking });
+  assert.match(selection.reply, /Reserva simulada/);
 });

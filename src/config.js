@@ -30,6 +30,9 @@ export function loadConfig() {
       [...database.searchParams.keys()].some(key => /^ssl|^uselibpqcompat$/i.test(key))) {
     throw new Error('Configure DATABASE_URL com a URI PostgreSQL, sem parâmetros SSL');
   }
+  const geminiKey = env.GEMINI_API_KEY?.trim();
+  const openaiKey = env.OPENAI_API_KEY?.trim();
+  if (!geminiKey && !openaiKey) throw new Error('Configure GEMINI_API_KEY ou OPENAI_API_KEY');
   const port = Number(env.PORT || 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT inválida');
   return {
@@ -40,7 +43,8 @@ export function loadConfig() {
     adminEmail: env.ADMIN_EMAIL?.trim(),
     adminPassword: env.ADMIN_PASSWORD,
     crmEncryptionKey,
-    openai: { apiKey: required('OPENAI_API_KEY'), model: env.OPENAI_MODEL || 'gpt-4o' },
+    geminiKey,
+    openai: { apiKey: openaiKey, model: env.OPENAI_MODEL || 'gpt-4o' },
     ghl: { version: env.GHL_API_VERSION || 'v3', publicKey }
   };
 }
