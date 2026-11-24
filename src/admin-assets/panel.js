@@ -71,6 +71,9 @@ if (sim) {
   const reset = sim.querySelector('[data-reset]');
   const history = [];
   const clinicName = sim.elements.nome_clinica;
+  const offline = sim.elements.offline;
+  const documents = sim.elements.include_documents;
+  let useDocuments = true;
   let previousName;
 
   function message(kind, text, detail) {
@@ -101,6 +104,25 @@ if (sim) {
     log.append(empty);
     status.textContent = '';
   }
+  function refreshDocuments() {
+    if (!documents) return;
+    documents.disabled = offline.checked || send.disabled;
+    documents.checked = !offline.checked && useDocuments;
+  }
+  offline.addEventListener('change', () => {
+    refreshDocuments();
+    if (history.length) {
+      clearConversation();
+      status.textContent = 'Nova conversa iniciada com o modo de simulação selecionado.';
+    }
+  });
+  documents?.addEventListener('change', () => {
+    useDocuments = documents.checked;
+    if (history.length) {
+      clearConversation();
+      status.textContent = 'Nova conversa iniciada com a seleção de documentos atual.';
+    }
+  });
   reset.addEventListener('click', () => {
     clearConversation();
     sim.elements.mensagem.focus();
@@ -121,18 +143,21 @@ if (sim) {
     if (clinicName) clinicName.disabled = true;
     send.disabled = true;
     reset.disabled = true;
-    const withAI = !sim.elements.offline.checked;
+    const withAI = !offline.checked;
+    const includeDocuments = withAI && Boolean(documents?.checked);
+    offline.disabled = true;
+    refreshDocuments();
     status.textContent = 'Preparando resposta…';
     try {
       const response = await fetch(sim.action, { method: 'POST', headers: {
         'Content-Type': 'application/json', 'X-CSRF-Token': sim.elements._csrf.value
-      }, body: JSON.stringify({ text, withAI, history: history.slice(-80), nome_clinica: name }) });
+      }, body: JSON.stringify({ text, withAI, includeDocuments, history: history.slice(-80), nome_clinica: name }) });
       const answer = await response.json();
       if (!response.ok) throw new Error(answer.error || 'Falha no teste.');
       message('lead', text);
-      const sources = answer.sources.length ? ' · Documentos consultados: ' + answer.sources.join(', ') : '';
+      const sources = answer.sources.length ? ' · Documentos enviados à IA: ' + answer.sources.join(', ') : '';
       const notes = answer.feedbackCount
-        ? ' · Feedbacks ' + (withAI ? 'enviados à IA' : 'cadastrados') + ' (' + answer.feedbackCount + ')'
+        ? ' · Feedbacks enviados à IA (' + answer.feedbackCount + ')'
         : '';
       message('robot', answer.reply, answer.action + sources + notes);
       history.push({ inbound: text, outbound: answer.reply, offered: answer.offered, agenda_ofertada: answer.agenda_ofertada });
@@ -145,6 +170,8 @@ if (sim) {
       if (clinicName) clinicName.disabled = false;
       send.disabled = false;
       reset.disabled = false;
+      offline.disabled = false;
+      refreshDocuments();
       sim.elements.mensagem.focus();
     }
   });

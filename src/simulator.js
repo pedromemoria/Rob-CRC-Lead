@@ -68,7 +68,7 @@ export async function simulate({ text, history, withAI, knowledge, decide, booki
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
   return {
     reply, action, offered: Boolean(result.offer),
-    sources: knowledge.references.map(item => item.nome),
-    feedbackCount: knowledge.feedback?.length ?? 0
+    sources: withAI ? decision.modelContext?.references?.map(item => item.nome) ?? [] : [],
+    feedbackCount: withAI ? decision.modelContext?.feedback?.length ?? 0 : 0
   };
 }

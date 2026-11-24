@@ -401,12 +401,19 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   let modelRefs;
   let modelFeedback;
   let modelClinicName;
+  let searches = 0;
+  const findDocs = docs.context;
+  docs.context = (...args) => {
+    searches++;
+    return findDocs(...args);
+  };
   const server = createApp({ adminToken, ghl: {} }, store, clinics, {
     documents: docs, feedback, decide: async (event, history, knowledge) => {
-      modelRefs = knowledge.references;
-      modelFeedback = knowledge.feedback;
+      const modelContext = await knowledge.loadContext?.() ?? knowledge;
+      modelRefs = modelContext.references;
+      modelFeedback = modelContext.feedback;
       modelClinicName = knowledge.clinicName;
-      return { kind: 'responder', text: replies.convidar, offer: true };
+      return { kind: 'responder', text: replies.convidar, offer: true, modelContext };
     }
   }).listen(0, '127.0.0.1');
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -425,6 +432,7 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const selectedSimulator = await (await fetch(simulatorPage + '&clinica=' + first, { headers })).text();
   assert.match(selectedSimulator, /data-simulator/);
   assert.match(selectedSimulator, /Simulação sem IA/);
+  assert.match(selectedSimulator, /name="include_documents" disabled/);
   const html = await (await fetch(site(first), { headers })).text();
   const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
   const trainingUrl = site(first).replace('aba=arquivos', 'aba=treinamento');
@@ -461,19 +469,27 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.doesNotMatch(opened, /<script>/);
   assert.equal((await fetch(site(second) + '&arquivo=' + file.id, { headers })).status, 404);
 
-  const simulation = (id, withAI, text = 'Qual o horário aos sábados?') => fetch(base + '/admin/simular?clinica=' + id, {
+  const simulation = (id, withAI, text = 'Qual o horário aos sábados?', includeDocuments = true) => fetch(base + '/admin/simular?clinica=' + id, {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
-    body: JSON.stringify({ withAI, text })
+    body: JSON.stringify({ withAI, text, includeDocuments })
   });
   const noAI = await (await simulation(first, false)).json();
   assert.equal(noAI.reply, 'Atendemos aos sábados.');
-  assert.deepEqual(noAI.sources, ['atendimento.txt']);
-  assert.equal(noAI.feedbackCount, 1);
+  assert.deepEqual(noAI.sources, []);
+  assert.equal(noAI.feedbackCount, 0);
+  assert.equal(searches, 0);
   const appointment = await (await simulation(first, false, 'Eu quero agendar de manhã')).json();
   assert.match(appointment.reply, /nome completo/);
-  assert.equal((await simulation(first, true)).status, 200);
+  const withDocs = await (await simulation(first, true)).json();
+  assert.deepEqual(withDocs.sources, ['atendimento.txt']);
   assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
+  assert.equal(searches, 1);
+  const withoutDocs = await (await simulation(first, true, 'Qual o horário aos sábados?', false)).json();
+  assert.deepEqual(withoutDocs.sources, []);
+  assert.equal(withoutDocs.feedbackCount, 1);
+  assert.deepEqual(modelRefs, []);
+  assert.equal(searches, 1);
   const quickAI = await fetch(base + '/admin/simular?modo=rapido', {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
     body: JSON.stringify({ withAI: true, text: 'A consulta é presencial?', nome_clinica: 'Clínica first' })
@@ -1013,4 +1029,16 @@ test('simulador aceita a escolha entre dois horários fictícios', async () => {
   const history = validHistory([{ inbound: 'Dados completos', outbound: offer.reply, agenda_ofertada: offer.agenda_ofertada }]);
   const selection = await simulate({ text: '2', history, knowledge, withAI: false, booking });
   assert.match(selection.reply, /Reserva simulada/);
+});
+
+test('resposta direta no modo IA não carrega documentos e não exibe fontes', async () => {
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'sources')),
+    loadContext: async () => assert.fail('A consulta de documentos é feita apenas para o modelo') };
+  const decide = createAgent({ model: 'test' }, { chat: { completions: {
+    create: async () => assert.fail('Saudação direta não precisa chamar o provedor')
+  } } });
+  const answer = await simulate({ text: 'Oi', history: [], knowledge, withAI: true, decide });
+  assert.match(answer.reply, /Como posso ajudar/);
+  assert.deepEqual(answer.sources, []);
+  assert.equal(answer.feedbackCount, 0);
 });

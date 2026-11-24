@@ -219,7 +219,7 @@ export function simulationClinicPicker(clinics, current) {
 export function tester(clinic, csrf, aiReady = false) {
   const action = clinic ? adminUrl(clinic.id, undefined, 'simular') : '/admin/simular?modo=rapido';
   return '<section class="card chat">' + heading('Simulador de atendimento', clinic
-    ? 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.'
+    ? 'Os documentos são opcionais no modo com IA. As mensagens do teste não são enviadas ao CRM.'
     : 'Informe o nome da clínica para testar com respostas genéricas, sem conectar um CRM.') +
     (clinic ? '<p><a href="/admin/treinar?aba=teste&amp;modo=rapido">Simular só com o nome</a></p>' : '') +
     '<div class="chat-log" data-chat-log role="log" aria-label="Conversa de teste"><p class="muted" data-empty>' +
@@ -228,6 +228,8 @@ export function tester(clinic, csrf, aiReady = false) {
     (clinic ? '' : input({}, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"')) +
     '<div class="chat-options"><label class="toggle"><input type="checkbox" name="offline"' +
     (aiReady ? '' : ' checked') + '> Simulação sem IA</label>' +
+    (clinic ? '<label class="toggle"><input type="checkbox" name="include_documents"' +
+      (aiReady ? ' checked' : ' disabled') + '> Incluir documentos</label>' : '') +
     '<button class="secondary" type="button" data-reset>Limpar conversa</button></div>' +
     '<label for="mensagem">Mensagem do lead</label><div class="composer"><textarea id="mensagem" name="mensagem" ' +
     'placeholder="Ex.: Quais são os horários?" rows="2" maxlength="1000" required></textarea><button>Enviar</button></div>' +

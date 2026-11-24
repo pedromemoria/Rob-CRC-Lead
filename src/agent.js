@@ -116,7 +116,7 @@ export function eligibleSalesReply(text) {
 export function createAgent(config, client = new OpenAI({
   apiKey: config.apiKey, timeout: 20000, maxRetries: 0
 })) {
-  async function decide(event, history, knowledge) {
+  async function decide(event, history, knowledge, recordContext) {
     const lead = normalize(event.text);
     const reason = explicitHandoff(lead);
     if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
@@ -130,6 +130,7 @@ export function createAgent(config, client = new OpenAI({
     const options = new Map([...approved, ...facts, ...Object.entries(replies), ['spin_proximo', fallback.text]]
       .filter(([id, answer]) => !id.endsWith('_valor') && eligibleSalesReply(answer)));
     const last = history.at(-1);
+    const context = knowledge.loadContext ? await knowledge.loadContext() : knowledge;
     const result = await client.chat.completions.create({
       model: config.model, temperature: 0, store: false, max_completion_tokens: 300,
       messages: [
@@ -138,8 +139,8 @@ export function createAgent(config, client = new OpenAI({
           base_de_conhecimento: files,
           nome_da_clinica: knowledge.clinicName,
           dados_da_clinica: clinicData ?? {},
-          feedbacks_da_clinica: knowledge.feedback ?? [],
-          documentos_de_referencia: knowledge.references ?? [],
+          feedbacks_da_clinica: context.feedback ?? [],
+          documentos_de_referencia: context.references ?? [],
           respostas_disponiveis: Object.fromEntries(options),
           historico: modelHistory(history),
           mensagem_atual: event.text
@@ -155,6 +156,7 @@ export function createAgent(config, client = new OpenAI({
         })
       ]
     });
+    if (knowledge.loadContext) recordContext(context);
     const calls = result.choices?.[0]?.message?.tool_calls;
     const call = calls?.length === 1 && calls[0].type === 'function' ? calls[0].function : null;
     let args;
@@ -192,5 +194,9 @@ export function createAgent(config, client = new OpenAI({
     return { kind: 'responder', text,
       offer: offersBooking(text) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(text) };
   }
-  return async (event, history, knowledge) => nonRepeatingDecision(await decide(event, history, knowledge), history);
+  return async (event, history, knowledge) => {
+    let modelContext;
+    const decision = nonRepeatingDecision(await decide(event, history, knowledge, context => { modelContext = context; }), history);
+    return modelContext ? { ...decision, modelContext } : decision;
+  };
 }

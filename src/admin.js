@@ -268,8 +268,8 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
   }
 
   router.post('/simular', json, protect, selectSimulationClinic, async (req, res) => {
-    const { text, withAI } = req.body ?? {};
-    if (typeof text !== 'string' || !text.trim() || text.length > 1000 || typeof withAI !== 'boolean') {
+    const { text, withAI, includeDocuments = true } = req.body ?? {};
+    if (typeof text !== 'string' || !text.trim() || text.length > 1000 || typeof withAI !== 'boolean' || typeof includeDocuments !== 'boolean') {
       return res.status(422).json({ error: 'Digite uma mensagem com até 1.000 caracteres.' });
     }
     const clinic = res.locals.clinic;
@@ -277,8 +277,15 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     let knowledge;
     if (clinic) {
       const search = [text, history.at(-1)?.inbound].filter(Boolean).join(' ');
-      const [references, corrections] = await Promise.all([documents.context(clinic.id, search), feedback.list(clinic.id)]);
-      knowledge = { ...clinicKnowledge(clinic), references, feedback: corrections.map(row => row.conteudo) };
+      knowledge = { ...clinicKnowledge(clinic), references: [] };
+      if (withAI) {
+        knowledge.loadContext = async () => {
+          const [references, corrections] = await Promise.all([
+            includeDocuments ? documents.context(clinic.id, search) : [], feedback.list(clinic.id)
+          ]);
+          return { references, feedback: corrections.map(row => row.conteudo) };
+        };
+      }
     } else {
       if (req.query.modo !== 'rapido') return res.sendStatus(404);
       const name = typeof req.body.nome_clinica === 'string' ? req.body.nome_clinica.trim() : '';
