@@ -1,3 +1,4 @@
+import { modelReferences } from './documents.js';
 import OpenAI from 'openai';
 import { canSelectClinicFact, clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
 import { consultativeDecision, consultativeFallback, firstName, isContactPrompt, mentionsPrice, modelHistory, nonRepeatingDecision, normalize, validSalesReply } from './sales.js';
@@ -92,10 +93,11 @@ export function allowBooking(text, evidence, bookingOffered) {
   const quote = normalize(evidence);
   if (/\b(?:nao|talvez|se eu|outra hora|depois|sem compromisso de marcar)\b/.test(lead)) return false;
   if (/\b(?:quero|desejo|gostaria de|vamos|pretendo|preciso|pode|posso|consegue|como faco para|tem como|da para)\s+(?:ja\s+)?(?:agendar|marcar|reservar|fazer (?:um )?agendamento|confirmar (?:o |a )?(?:horario|consulta|reuniao|sessao|agendamento))\b/.test(quote)) return true;
+  if (/\b(?:quero|desejo|gostaria de|aceito) (?:fazer |ter |passar por )?(?:uma? |a |pela )?(?:consulta|avaliacao)\b/.test(quote)) return true;
   if ((bookingOffered || asksAboutBooking(quote)) &&
       /\b(?:manda|mande|envia|envie|passa|passe|enviar|mandar|passar|quero)\b.{0,45}\b(?:link|agenda)\b/.test(quote)) return true;
   if (!bookingOffered) return false;
-  return /^(?:sim|faz sim|sim faz|quero(?: sim)?|claro|pode(?: ser| sim)?|bora|vamos|combinado|fechado|ok|topo|aceito|por favor|serve)[.!? ]*$/.test(lead) ||
+  return /^(?:sim|faz sim|sim faz|quero(?: sim)?|claro|pode(?: ser| sim)?|bora|vamos|combinado|fechado|ok|topo|aceito|por favor|serve)(?:[, ]+por favor)?[.!? ]*$/.test(lead) ||
     /^(?:(?:sim|combinado|pode ser|fechado)[,! ]+)?(?:as )?\d{1,2}(?::\d{2}|h(?:\d{2})?)?(?: (?:esta bom|funciona|serve))?[.! ]*$/.test(lead) ||
     /^(?:amanha|hoje|segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:.{0,32})(?:funciona|serve|pode ser)[.! ]*$/.test(lead);
 }
@@ -103,8 +105,8 @@ export function allowBooking(text, evidence, bookingOffered) {
 export function bookingInterest(text, history) {
   const last = history.at(-1);
   const evaluationOffer = answer => typeof answer === 'string' &&
-    /\b(?:(?:faz sentido|quer|gostaria de|vamos) (?:agendar|marcar|fazer (?:uma )?avaliacao)|faz sentido conversar.{0,55}em uma avaliacao)\b[^?]*\?/.test(normalize(answer));
-  const recovering = /^entendo[.! ]+se quiser conversar mais sobre a avaliacao, fico a disposicao[.! ]*$/u
+    /\b(?:(?:faz sentido|quer|gostaria de|vamos) (?:agendar|marcar|fazer (?:uma )?avaliacao)|quer que eu encaminhe.{0,40}(?:consulta|avaliacao)|faz sentido conversar.{0,55}em uma avaliacao)\b[^?]*\?/.test(normalize(answer));
+  const recovering = /\bse quiser conversar mais sobre a avaliacao, fico a disposicao[.! ]*$/u
     .test(normalize(last?.outbound ?? ''));
   return allowBooking(text, text, Boolean(last?.offered || evaluationOffer(last?.outbound) || recovering));
 }
@@ -135,6 +137,8 @@ function acknowledgmentFrom(call, args) {
 
 export function addAcknowledgment(text, acknowledgment, previous) {
   if (!acknowledgment) return text;
+  const opening = normalize(acknowledgment).match(/^entend[oi]\b/u);
+  if (opening && /^entend[oi]\b/u.test(normalize(previous ?? ''))) return text;
   const greeting = /^(?:Oi, [^!]+!|Oi!)/u.exec(text);
   // Keep the name or greeting already validated by the application.
   const preface = greeting && /^(oi|ola)\b/.test(normalize(acknowledgment))
@@ -186,6 +190,7 @@ export function createAgent(config, client = new OpenAI({
       .filter(([id, answer]) => !id.endsWith('_valor') && eligibleSalesReply(answer)));
     const context = closingContact || reason ? { references: [], feedback: [] }
       : knowledge.loadContext ? await knowledge.loadContext() : knowledge;
+    const references = modelReferences(context.references);
     const data = {
       historico: modelHistory(history),
       mensagem_atual: closingContact ? '[dado de contato para agendamento]' : event.text,
@@ -193,7 +198,7 @@ export function createAgent(config, client = new OpenAI({
       nome_da_clinica: knowledge.clinicName,
       dados_da_clinica: clinicData ?? {},
       feedbacks_da_clinica: context.feedback ?? [],
-      documentos_de_referencia: context.references ?? []
+      documentos_de_referencia: references
     };
     let result;
     try {
@@ -214,9 +219,9 @@ export function createAgent(config, client = new OpenAI({
     const call = unpackTool(result);
     const acknowledgment = acknowledgmentFrom(call.name, call.args);
     const ai = {
-      ...(result.provider ? { provider: result.provider } : {}),
+      ...(result.provider ? { provider: result.provider, model: result.model } : {}),
       ...(acknowledgment ? { acknowledgment } : {}),
-      ...(knowledge.loadContext ? { modelContext: context } : {})
+      ...(knowledge.loadContext ? { modelContext: { ...context, references } } : {})
     };
     let decision = fixed;
     if (!decision) {
@@ -252,7 +257,7 @@ export function createAgent(config, client = new OpenAI({
     const call = unpackTool(result);
     const acknowledgment = acknowledgmentFrom(call.name, call.args);
     return { text: addAcknowledgment(text, acknowledgment, history.at(-1)?.outbound),
-      provider: result.provider ?? 'OpenAI' };
+      provider: result.provider ?? 'OpenAI', model: result.model };
   };
   return decide;
 }

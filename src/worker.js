@@ -16,8 +16,17 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
   let active;
   let nextPrune = 0;
 
+  async function offerBookingLink(store, job, booking, acknowledgment) {
+    const externalRef = job.id.slice(0, 32);
+    await store.plan(job, { kind: 'booking_message', acknowledgment,
+      text: 'Você pode escolher um horário e confirmar sua consulta na agenda da clínica:\n' +
+        externalBookingLink(booking.bookingLink, externalRef),
+      bookingOffer: { externalRef, leadId: job.event.leadId, conversationId: job.event.conversationId } }, 'send');
+  }
+
   async function offerSlots(store, job, crm, booking, turn, prefix = '', acknowledgment) {
     const options = availableOptions(await crm.slots(booking), booking, turn);
+    if (!options.length && booking.bookingLink) return offerBookingLink(store, job, booking, acknowledgment);
     const text = options.length ? prefix + slotMessage(options)
       : prefix + 'No momento não encontrei horários disponíveis. Você pode tentar novamente mais tarde.';
     await store.plan(job, { kind: 'booking_message', text, acknowledgment,
@@ -71,13 +80,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
         if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
         else if (decision.kind === 'qualificar_agendamento') {
           if (booking.calendarId) await offerSlots(store, job, crm, booking, decision.turn, '', decision.acknowledgment);
-          else if (booking.bookingLink) {
-            const externalRef = job.id.slice(0, 32);
-            await store.plan(job, { kind: 'booking_message', acknowledgment: decision.acknowledgment,
-              text: 'Você pode escolher um horário e confirmar sua consulta na agenda da clínica:\n' +
-                externalBookingLink(booking.bookingLink, externalRef),
-              bookingOffer: { externalRef, leadId: job.event.leadId, conversationId: job.event.conversationId } }, 'send');
-          }
+          else if (booking.bookingLink) await offerBookingLink(store, job, booking, decision.acknowledgment);
           else await store.plan(job, decision, 'qualify');
         } else {
           if (!allowedDecision(decision)) throw new KnowledgeError('Resposta inválida');

@@ -4,10 +4,12 @@ export const normalize = text => text.normalize('NFD').replace(/\p{Mark}+/gu, ''
 
 export const salesReplies = {
   situacao: 'Entendo que você esteja buscando orientação. Essa consulta seria para você ou para um familiar?',
-  problema: 'Entendi. O que mais te preocupa nessa situação?',
+  problema: 'Imagino que isso mereça atenção. O que mais te preocupa nessa situação?',
   impacto: 'Faz sentido querer entender isso melhor. Como essa situação tem afetado sua rotina?',
   necessidade: 'Entendo como isso pode pesar na rotina. Faz sentido conversar com a equipe em uma avaliação?',
-  turno: 'Entendi, você quer agendar. Prefere que a equipe verifique horários de manhã ou à tarde?',
+  convite: 'Entendo que você queira esclarecer suas dúvidas. Quer que eu encaminhe seu pedido de consulta?',
+  convite_alternativo: 'Claro, posso ajudar com o agendamento. Gostaria de fazer uma avaliação?',
+  turno: 'Combinado. Prefere que a equipe verifique horários de manhã ou à tarde?',
   preco_contexto: 'Entendo que o valor seja importante. A avaliação ajuda a esclarecer o que faz sentido para você. Qual serviço você procura?',
   preco_objecao: 'Faz sentido avaliar o investimento com calma. Quer que a equipe explique o que está incluso na consulta?',
   pensar: 'Claro, é uma decisão importante. Tem alguma dúvida que eu possa esclarecer enquanto você decide?',
@@ -28,7 +30,7 @@ export function preferredTurn(text) {
 export function validSalesReply(text) {
   return typeof text === 'string' && text.trim() && text.length <= 320 &&
     text.split(/\r?\n/).length <= 4 && (text.match(/\?/g)?.length ?? 0) <= 1 &&
-    (!text.includes('?') || /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|com certeza|obrigad[oa]|agradeco)\b/.test(normalize(text))) &&
+    (!text.includes('?') || /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|com certeza|combinado|otimo|obrigad[oa]|agradeco)\b/.test(normalize(text))) &&
     !/\b(?:pre[- ]?reserv\w*|(?:horarios?|vagas?) (?:acabando|limitad[oa]s?)|(?:temos|tenho) (?:vaga|disponibilidade|horario)|garant\w* (?:cura|resultado))\b/.test(normalize(text));
 }
 
@@ -43,11 +45,13 @@ const closingPrompts = {
   ],
   turno: [
     salesReplies.turno,
-    'Claro. Para eu encaminhar o pedido, qual turno funciona melhor para você, manhã ou tarde?'
+    'Claro. Para eu encaminhar o pedido, qual turno funciona melhor para você, manhã ou tarde?',
+    'Entendi, você quer agendar. Prefere que a equipe verifique horários de manhã ou à tarde?'
   ],
   nome: [
-    'Entendi sua preferência de turno. Qual é seu nome completo para a equipe localizar o cadastro?',
-    'Entendi. Pode me informar seu nome e sobrenome para encaminhar o pedido?'
+    'Ótimo, já registrei o turno de sua preferência. Qual é seu nome completo para a equipe localizar o cadastro?',
+    'Entendi. Pode me informar seu nome e sobrenome para encaminhar o pedido?',
+    'Entendi sua preferência de turno. Qual é seu nome completo para a equipe localizar o cadastro?'
   ],
   telefone: [
     'Obrigado. Qual telefone ou WhatsApp com DDD a equipe pode usar para confirmar?',
@@ -65,7 +69,8 @@ export function baseSalesReply(text) {
 }
 
 const turnOffer = text => [...closingPrompts.turno, salesReplies.tempo].includes(baseSalesReply(text));
-const offer = text => turnOffer(text) || text === salesReplies.necessidade;
+const evaluationOffers = [salesReplies.necessidade, salesReplies.convite, salesReplies.convite_alternativo];
+const offer = text => turnOffer(text) || evaluationOffers.includes(text);
 const response = (text, booking = false) => ({ kind: 'responder', text, offer: booking || offer(text) });
 
 function askClosing(step, last) {
@@ -129,6 +134,9 @@ export function nonRepeatingDecision(decision, history) {
       return response(prompts.find(prompt => !sameReply(prompt, decision.text)), step === 'turno');
     }
   }
+  if (evaluationOffers.includes(decision.text)) {
+    return response(decision.text === salesReplies.convite ? salesReplies.convite_alternativo : salesReplies.convite);
+  }
   const progress = consultativeFallback(history);
   if (!sameReply(progress.text, decision.text)) return progress;
   return response('Tudo bem. Posso ajudar com uma dúvida sobre a consulta ou encaminhar um pedido de agendamento.');
@@ -140,16 +148,17 @@ export function isContactPrompt(outbound) {
 }
 
 export function modelHistory(history) {
-  const result = history.map((turn, index) => {
-    const previous = history[index - 1]?.outbound;
-    return { lead: isContactPrompt(previous) ? '[dado de contato para agendamento]' : turn.inbound, sdr: turn.outbound };
-  });
-  let chars = 0;
-  return result.reverse().filter(turn => {
-    const size = (turn.lead?.length ?? 0) + (turn.sdr?.length ?? 0);
-    chars += size;
-    return chars <= 80_000;
-  }).reverse();
+  const start = Math.max(0, history.length - 8);
+  return history.slice(start).flatMap((turn, index) => {
+    const messages = [];
+    if (typeof turn.inbound === 'string') {
+      const text = isContactPrompt(history[start + index - 1]?.outbound)
+        ? '[dado de contato para agendamento]' : turn.inbound.slice(0, 1000);
+      messages.push({ papel: 'lead', texto: text });
+    }
+    if (typeof turn.outbound === 'string') messages.push({ papel: 'sdr', texto: turn.outbound.slice(0, 600) });
+    return messages;
+  }).slice(-15);
 }
 
 export function closingContext(plan) {
@@ -180,10 +189,10 @@ export function consultativeDecision(text, history, knowledge, booking, event = 
       latestAnswer(history, closingPrompts.nome, fullName) ?? fullName(event.contactName);
     const phone = (awaitingPhone ? contactPhone(text) : undefined) ?? contactPhone(event.contactPhone);
     const giveUp = /\b(?:prefiro nao|nao quero (?:informar|passar)|uso este numero|e este numero|o mesmo numero)\b/.test(lead);
-    if (!name && !awaitingPhone && !giveUp && previous !== closingPrompts.nome[1]) {
+    if (!name && !awaitingPhone && !giveUp) {
       return askClosing('nome', previous);
     }
-    if (!phone && !giveUp && previous !== closingPrompts.telefone[1]) return askClosing('telefone', previous);
+    if (!phone && !giveUp) return askClosing('telefone', previous);
     return { kind: 'qualificar_agendamento', turn, contactName: name, contactPhone: phone };
   }
 
@@ -230,8 +239,10 @@ export function consultativeFallback(history, lead, message = '') {
     const index = turn.outbound?.startsWith('Entendi que você busca atendimento em ') || exact === 1 ? 1 : exact;
     return Math.max(phase, index);
   }, -1);
-  return response(phases[goal && furthest < 0 ? 1 : furthest + 1] ??
-    'Entendo. Se quiser conversar mais sobre a avaliação, fico à disposição.');
+  const invited = history.some(turn => evaluationOffers.includes(baseSalesReply(turn.outbound)));
+  const next = baseSalesReply(history.at(-1)?.outbound) === salesReplies.convite
+    ? salesReplies.convite_alternativo : salesReplies.convite;
+  return response((invited ? undefined : phases[goal && furthest < 0 ? 1 : furthest + 1]) ?? next);
 }
 
 export function firstName(value) {

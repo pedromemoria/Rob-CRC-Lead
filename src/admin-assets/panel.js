@@ -71,7 +71,7 @@ if (sim) {
   const reset = sim.querySelector('[data-reset]');
   const history = [];
   const clinicName = sim.elements.nome_clinica;
-  const offline = sim.elements.offline;
+  const mode = sim.elements.mode;
   const documents = sim.elements.include_documents;
   let useDocuments = true;
   let previousName;
@@ -106,10 +106,10 @@ if (sim) {
   }
   function refreshDocuments() {
     if (!documents) return;
-    documents.disabled = offline.checked || send.disabled;
-    documents.checked = !offline.checked && useDocuments;
+    documents.disabled = mode.value !== 'ai' || send.disabled;
+    documents.checked = mode.value === 'ai' && useDocuments;
   }
-  offline.addEventListener('change', () => {
+  mode.addEventListener('change', () => {
     refreshDocuments();
     if (history.length) {
       clearConversation();
@@ -143,9 +143,9 @@ if (sim) {
     if (clinicName) clinicName.disabled = true;
     send.disabled = true;
     reset.disabled = true;
-    const withAI = !offline.checked;
+    const withAI = mode.value === 'ai';
     const includeDocuments = withAI && Boolean(documents?.checked);
-    offline.disabled = true;
+    mode.disabled = true;
     refreshDocuments();
     status.textContent = 'Preparando resposta…';
     try {
@@ -159,7 +159,9 @@ if (sim) {
       const notes = answer.feedbackCount
         ? ' · Feedbacks enviados à IA (' + answer.feedbackCount + ')'
         : '';
-      const provider = answer.provider ? ' · IA: ' + answer.provider : (withAI ? '' : ' · Sem IA');
+      const provider = answer.provider
+        ? ' · IA: ' + answer.provider + (answer.model ? ' (' + answer.model + ')' : '')
+        : (withAI ? '' : ' · Sem IA');
       message('robot', answer.reply, answer.action + provider + sources + notes);
       history.push({ inbound: text, outbound: answer.reply, offered: answer.offered, agenda_ofertada: answer.agenda_ofertada });
       if (history.length > 80) history.shift();
@@ -171,7 +173,7 @@ if (sim) {
       if (clinicName) clinicName.disabled = false;
       send.disabled = false;
       reset.disabled = false;
-      offline.disabled = false;
+      mode.disabled = false;
       refreshDocuments();
       sim.elements.mensagem.focus();
     }

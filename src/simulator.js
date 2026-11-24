@@ -41,20 +41,23 @@ export function validHistory(history) {
 
 export async function simulate({ text, history, withAI, knowledge, decide, booking = {} }) {
   const pending = booking.calendarId && history.at(-1)?.agenda_ofertada;
-  if (pending?.length && !explicitHandoff(normalize(text))) {
+  const lead = normalize(text);
+  if (pending?.length && !explicitHandoff(lead) && !wantsAssessment(lead) &&
+      !/\b(?:vou pensar|nao quero|desisti|outra hora)\b/.test(lead)) {
     const index = chosenOption(text, pending);
-    if (index >= 0) {
-      const text = 'Reserva simulada para ' + pending[index].text + '.';
-      const styled = withAI && decide.styleReply ? await decide.styleReply(text, history) : { text };
-      return { reply: styled.text, provider: styled.provider, action: 'Simular alteração para Agendado',
-        offered: false, sources: [], feedbackCount: 0 };
-    }
+    const prompt = pending.length === 1 ? 'Responda 1 para escolher o horário.' : 'Responda 1 ou 2 para indicar sua preferência.';
+    const next = index >= 0 ? 'Reserva simulada para ' + pending[index].text + '.'
+      : history.at(-1).outbound.endsWith(prompt) ? slotMessage(pending) : prompt;
+    const styled = withAI && decide.styleReply ? await decide.styleReply(next, history) : { text: next };
+    return { reply: styled.text, provider: styled.provider, model: styled.model, action: index >= 0 ? 'Simular alteração para Agendado' : 'Escolher horário simulado',
+      agenda_ofertada: index >= 0 ? undefined : pending, offered: false, sources: [], feedbackCount: 0 };
   }
   const decision = withAI ? await decide({ text }, history, { ...knowledge, simulator: true }) : offline(text, history, knowledge);
   const result = withAI ? decision : nonRepeatingDecision(decision, history);
   const styled = text => addAcknowledgment(text, decision.acknowledgment, history.at(-1)?.outbound);
   const info = {
     provider: decision.provider,
+    model: decision.model,
     sources: withAI ? decision.modelContext?.references?.map(item => item.nome) ?? [] : [],
     feedbackCount: withAI ? decision.modelContext?.feedback?.length ?? 0 : 0
   };
@@ -66,7 +69,7 @@ export async function simulate({ text, history, withAI, knowledge, decide, booki
       agenda_ofertada: options, offered: false, ...info };
   }
   if (result.kind === 'qualificar_agendamento' && booking.bookingLink) {
-    return { reply: styled('No atendimento, o robô enviaria o link da agenda da clínica.'), action: 'Simular envio do link',
+    return { reply: styled('Você pode escolher um horário e confirmar sua consulta na agenda da clínica:\n' + booking.bookingLink), action: 'Simular envio do link',
       offered: false, ...info };
   }
   let reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply

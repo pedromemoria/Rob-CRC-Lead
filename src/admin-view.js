@@ -226,8 +226,10 @@ export function tester(clinic, csrf, aiReady = false) {
     'Envie uma mensagem para iniciar o teste.</p></div><form data-simulator action="' +
     escape(action) + '">' + hidden('_csrf', csrf) +
     (clinic ? '' : input({}, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"')) +
-    '<div class="chat-options"><label class="toggle"><input type="checkbox" name="offline"' +
-    (aiReady ? '' : ' checked') + '> Simulação sem IA</label>' +
+    '<div class="chat-options"><div class="field"><label for="sim-mode">Modo de atendimento</label>' +
+    '<select id="sim-mode" name="mode"><option value="ai"' + (aiReady ? ' selected' : '') +
+    '>IA Real (Gemini/OpenAI)</option><option value="offline"' + (aiReady ? '' : ' selected') +
+    '>Modo Simulação (Sem IA)</option></select></div>' +
     (clinic ? '<label class="toggle"><input type="checkbox" name="include_documents"' +
       (aiReady ? ' checked' : ' disabled') + '> Incluir documentos</label>' : '') +
     '<button class="secondary" type="button" data-reset>Limpar conversa</button></div>' +

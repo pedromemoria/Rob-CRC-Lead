@@ -121,6 +121,27 @@ export function terms(text) {
   return [...new Set(text.toLowerCase().match(/\p{Script=Latin}{3,}/gu) ?? [])].slice(0, 12);
 }
 
+export const maxDocumentContextChars = 12_000;
+
+export function modelReferences(references = []) {
+  const result = [];
+  let remaining = maxDocumentContextChars - 2;
+  for (const reference of references) {
+    if (typeof reference?.nome !== 'string' || typeof reference?.trecho !== 'string') continue;
+    const nome = reference.nome.slice(0, 180);
+    const overhead = JSON.stringify({ nome, trecho: '' }).length + 1;
+    if (remaining <= overhead) break;
+    let trecho = reference.trecho.slice(0, remaining - overhead);
+    while (trecho && JSON.stringify({ nome, trecho }).length + 1 > remaining) {
+      trecho = trecho.slice(0, Math.floor(trecho.length / 2));
+    }
+    if (!trecho) continue;
+    remaining -= JSON.stringify({ nome, trecho }).length + 1;
+    result.push({ nome, trecho });
+  }
+  return result;
+}
+
 export function createDocuments(database) {
   return {
     async list(clinicId) {
@@ -157,15 +178,17 @@ export function createDocuments(database) {
       return result.rowCount > 0;
     },
     async context(clinicId, query) {
+      const search = terms(query).map(word => word.slice(0, 60)).join(' | ');
+      if (!search) return [];
       const { rows } = await database.query(
         "WITH search AS (SELECT to_tsquery('portuguese', $2) AS q) " +
-        "SELECT nome, left(CASE WHEN busca @@ q THEN ts_headline('portuguese', conteudo, q, " +
-        "'MaxFragments=3, MinWords=12, MaxWords=55, StartSel=[, StopSel=]') ELSE conteudo END, 1600) AS trecho " +
-        'FROM sdr.clinic_files, search WHERE clinica_id = $1 ' +
-        'ORDER BY (busca @@ q) DESC, ts_rank(busca, q) DESC, enviado_em DESC, id LIMIT 4',
-        [clinicId, terms(query).map(word => word.slice(0, 60)).join(' | ')]
+        "SELECT nome, left(ts_headline('portuguese', conteudo, q, " +
+        "'MaxFragments=3, MinWords=12, MaxWords=65, StartSel=[, StopSel=]'), 2600) AS trecho " +
+        'FROM sdr.clinic_files, search WHERE clinica_id = $1 AND busca @@ q ' +
+        'ORDER BY ts_rank(busca, q) DESC, enviado_em DESC, id LIMIT 4',
+        [clinicId, search]
       );
-      return rows;
+      return modelReferences(rows);
     }
   };
 }

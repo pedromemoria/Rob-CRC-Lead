@@ -11,7 +11,7 @@ import { clinicKnowledge, createClinics } from '../src/clinics.js';
 import { createAccounts } from '../src/accounts.js';
 import { createSessions } from '../src/admin-auth.js';
 import { createFeedback } from '../src/feedback.js';
-import { createDocuments, extractDocument } from '../src/documents.js';
+import { createDocuments, extractDocument, modelReferences } from '../src/documents.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
@@ -281,15 +281,16 @@ test('fila usa treinamento, credenciais, tarefas, histórico e pausas de cada cl
     assert.equal(training.replies.get('resposta'), e.clinicId === first ? 'Conhecimento Alfa.' : 'Conhecimento Beta.');
     assert.deepEqual(training.feedback, [e.clinicId === first ? 'Feedback Alfa' : 'Feedback Beta']);
     if (e.eventId === '1') assert.deepEqual(history, []);
-    assert.deepEqual(training.references.map(file => file.nome), [e.clinicId === first ? 'alfa.txt' : 'beta.txt']);
+    const sources = e.text === 'Humano' ? [] : [e.clinicId === first ? 'alfa.txt' : 'beta.txt'];
+    assert.deepEqual(training.references.map(file => file.nome), sources);
     return e.text === 'Humano'
       ? { kind: 'transbordo_humano', reason: 'humano' } : { kind: 'qualificar_agendamento' };
   };
   await documents.save(first, await extractDocument({ originalname: 'alfa.txt', buffer: Buffer.from('Documento Alfa') }));
   await documents.save(second, await extractDocument({ originalname: 'beta.txt', buffer: Buffer.from('Documento Beta') }));
   const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor, documents, feedback });
-  const a = event('1', first, 'a');
-  const b = event('1', second, 'b');
+  const a = event('1', first, 'a', 'Quero agendar sobre Alfa');
+  const b = event('1', second, 'b', 'Quero agendar sobre Beta');
   await store.enqueue([a, event('3', first, 'a'), { ...event('2', first, 'a', 'Humano'), leadId: '100' }, b]);
   for (let i = 0; i < 4; i++) await worker.tick();
   assert.deepEqual(actions, [
@@ -431,7 +432,7 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.match(picker, /data-simulator.*modo=rapido/);
   const selectedSimulator = await (await fetch(simulatorPage + '&clinica=' + first, { headers })).text();
   assert.match(selectedSimulator, /data-simulator/);
-  assert.match(selectedSimulator, /Simulação sem IA/);
+  assert.match(selectedSimulator, /Modo Simulação \(Sem IA\)/);
   assert.match(selectedSimulator, /name="include_documents" disabled/);
   const html = await (await fetch(site(first), { headers })).text();
   const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
@@ -879,10 +880,10 @@ test('aceites curtos retomam o fechamento, pedem dados um por vez e não repetem
   } } } };
   const decide = createAgent({ model: 'gpt-4o' }, mock);
   const invited = { inbound: 'Isso afeta minha rotina', outbound: salesReplies.necessidade, offered: true };
-  const previousLoop = { inbound: 'Pode ser', outbound: 'Entendo. Se quiser conversar mais sobre a avaliação, fico à disposição.', offered: false };
+  const previousLoop = { inbound: 'Pode ser', outbound: 'Claro, eu posso ajudar.\nEntendo. Se quiser conversar mais sobre a avaliação, fico à disposição.', offered: false };
 
   for (const withAI of [false, true]) {
-    for (const text of ['faz sim', 'quero', 'pode ser', 'por favor']) {
+    for (const text of ['faz sim', 'quero', 'pode ser', 'por favor', 'faz sim, por favor', 'Quero fazer a avaliação']) {
       const answer = await simulate({ text, history: [invited, previousLoop], withAI, knowledge, decide });
       assert.equal(answer.reply, salesReplies.turno);
     }
@@ -898,6 +899,7 @@ test('aceites curtos retomam o fechamento, pedem dados um por vez e não repetem
     assert.match((await add('Sim')).reply, /manhã ou tarde/);
     assert.match((await add('À tarde')).reply, /nome completo/);
     assert.match((await add('Ana')).reply, /nome e sobrenome/);
+    assert.match((await add('Ana')).reply, /nome completo/);
     assert.match((await add('Ana Pereira')).reply, /telefone ou WhatsApp/);
     assert.match((await add('123')).reply, /melhor número/);
     assert.equal((await add('(85) 99988-7766')).action, 'Encaminhar para agendamento no ERP · tarde');
@@ -915,19 +917,23 @@ test('aceites curtos retomam o fechamento, pedem dados um por vez e não repetem
 
 test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principal falha', async () => {
   const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'ai')), feedback: ['Atenda com empatia.'],
-    references: [{ nome: 'Guia.pdf', trecho: 'Atendimento da clínica.' }] };
+    references: [{ nome: 'Guia.pdf', trecho: 'Atendimento da clínica.' },
+      { nome: 'Grande.txt', trecho: '"\n'.repeat(12_000) }] };
   let responseStatus = 200;
-  let calls = 0;
+  const models = [];
   let fallbackCalls = 0;
   const fetcher = async (url, request) => {
-    calls++;
-    assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent');
+    assert.ok(url.startsWith('https://generativelanguage.googleapis.com/v1beta/models/'));
+    models.push(url.split('/').at(-1));
     assert.equal(request.headers['x-goog-api-key'], 'gemini-for-test');
     const body = JSON.parse(request.body);
     const context = JSON.parse(body.contents[0].parts[0].text);
     assert.deepEqual(context.feedbacks_da_clinica, ['Atenda com empatia.']);
     assert.equal(context.documentos_de_referencia[0].nome, 'Guia.pdf');
-    assert.equal(context.historico.length, 20);
+    assert.equal(context.historico.length, 15);
+    assert.deepEqual(context.historico[0], { papel: 'sdr', texto: 'Retorno 12' });
+    assert.deepEqual(context.historico.at(-1), { papel: 'sdr', texto: 'Retorno 19' });
+    assert.ok(JSON.stringify(context.documentos_de_referencia).length <= 12_000);
     assert.equal(body.toolConfig.functionCallingConfig.mode, 'ANY');
     assert.deepEqual(body.generationConfig, { maxOutputTokens: 1500 });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [
@@ -940,14 +946,19 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
   } } } };
   const config = { geminiKey: 'gemini-for-test', openai: { model: 'gpt-4o' } };
   const decide = createAgent(config.openai, createAIProvider(config, { fetcher, fallback }));
-  const history = Array.from({ length: 20 }, () => ({ inbound: 'Estou pesquisando', outbound: 'Entendi.' }));
+  const history = Array.from({ length: 20 }, (_, index) => ({ inbound: 'Estou pesquisando', outbound: 'Retorno ' + index }));
   const primary = await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge);
   assert.match(primary.text, /encontrar o atendimento certo/);
+  assert.equal(primary.model, 'gemini-2.5-flash');
   assert.equal(fallbackCalls, 0);
   responseStatus = 429;
   assert.equal((await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge)).text, replies.acolher);
-  assert.equal(calls, 2);
+  assert.deepEqual(models, ['gemini-2.5-flash:generateContent', 'gemini-2.5-flash:generateContent',
+    'gemini-2.5-flash-lite:generateContent', 'gemini-3.5-flash-lite:generateContent']);
   assert.equal(fallbackCalls, 1);
+  await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge);
+  assert.equal(models.length, 4);
+  assert.equal(fallbackCalls, 2);
   const onlyGemini = createAgent(config.openai, createAIProvider(config, { fetcher }));
   await assert.rejects(onlyGemini({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge),
     error => error.status === 429);
@@ -955,7 +966,7 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
 
 test('GoHighLevel reserva um horário verificado e atualiza a oportunidade uma única vez', async t => {
   const { clinics, store } = await fixture(t);
-  const id = await clinics.save(clinicForm('ghl', 'calendar', { calendarId: 'cal123', duration: '30', timezone: 'America/Fortaleza' }));
+  const id = await clinics.save(clinicForm('ghl', 'calendar', { calendarId: 'cal123', duration: '30', timezone: 'America/Fortaleza', bookingLink: 'https://reservas.example.org/agenda' }));
   const starts = [new Date(Date.now() + 86_400_000).toISOString(), new Date(Date.now() + 172_800_000).toISOString()];
   const events = [];
   const crmFor = config => createCrms(config, () => ({
@@ -995,6 +1006,13 @@ test('GoHighLevel reserva um horário verificado e atualiza a oportunidade uma �
   assert.match(events[3][1], /^Que bom poder ajudar\. Sua avaliação está confirmada/);
   assert.equal(styled.length, 1);
   assert.equal(await store.paused(id, leadKey(event('choose', id, 'calendar'))), false);
+
+  starts.length = 0;
+  await store.enqueue([event('no-slots', id, 'calendar')]);
+  await worker.tick();
+  assert.equal(events.at(-1)[0], 'send');
+  assert.match(events.at(-1)[1], /reservas\.example\.org\/agenda\?crc_ref=/);
+  assert.equal(events.filter(entry => entry[0] === 'stage').length, 1);
 });
 
 test('agenda externa só move o card após confirmação autenticada e correlacionada', async t => {
@@ -1035,6 +1053,9 @@ test('simulador aceita a escolha entre dois horários fictícios', async () => {
   const offer = await simulate({ text: 'Dados completos', history: [], knowledge, withAI: true, decide, booking });
   assert.equal(offer.agenda_ofertada.length, 2);
   const history = validHistory([{ inbound: 'Dados completos', outbound: offer.reply, agenda_ofertada: offer.agenda_ofertada }]);
+  const clarification = await simulate({ text: 'Opção 3', history, knowledge, withAI: false, booking });
+  assert.match(clarification.reply, /Responda 1 ou 2/);
+  history.push({ inbound: 'Opção 3', outbound: clarification.reply, agenda_ofertada: clarification.agenda_ofertada });
   const selection = await simulate({ text: '2', history, knowledge, withAI: false, booking });
   assert.match(selection.reply, /Reserva simulada/);
 });
@@ -1136,5 +1157,15 @@ test('modelo Gemini indisponível tenta outro Gemini antes de usar a OpenAI', as
   }] };
   const result = await provider.chat.completions.create(request);
   assert.equal(result.provider, 'Gemini');
-  assert.deepEqual(modelCalls, ['gemini-2.5-flash:generateContent', 'gemini-3.1-flash-lite:generateContent']);
+  assert.equal(result.model, 'gemini-2.5-flash-lite');
+  assert.deepEqual(modelCalls, ['gemini-2.5-flash:generateContent', 'gemini-2.5-flash-lite:generateContent']);
+});
+
+test('trechos de documentos respeitam o orçamento mesmo com aspas e quebras de linha', () => {
+  const references = modelReferences(Array.from({ length: 5 }, (_, index) => ({
+    nome: 'Fonte ' + index, trecho: '"\n'.repeat(24_000)
+  })));
+  assert.ok(references[0].trecho);
+  assert.ok(references.length < 5);
+  assert.ok(JSON.stringify(references).length <= 12_000);
 });

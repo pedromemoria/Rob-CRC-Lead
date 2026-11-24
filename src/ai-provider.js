@@ -1,11 +1,14 @@
 import OpenAI from 'openai';
 
 const geminiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
-export const defaultGeminiModel = 'gemini-3.5-flash-lite';
+export const defaultGeminiModel = 'gemini-2.5-flash';
+const currentGeminiModel = 'gemini-3.5-flash-lite';
 const backupGeminiModel = 'gemini-3.1-flash-lite';
+const legacyGeminiLite = 'gemini-2.5-flash-lite';
+const geminiTimeout = 12_000;
 
-function unavailable(status, code) {
-  return Object.assign(new Error('Provedor de IA indisponível'), { status, code });
+function unavailable(status, code, retryAfter) {
+  return Object.assign(new Error('Provedor de IA indisponível'), { status, code, retryAfter });
 }
 
 const knownCodes = new Set(['API_KEY_INVALID', 'insufficient_quota', 'invalid_api_key', 'model_not_found']);
@@ -40,11 +43,11 @@ export function providerFailureMessage(error) {
   return 'Falha ao consultar a IA. ' + [...new Set(messages)].join('. ') + '.';
 }
 
-async function geminiCompletion(key, model, request, fetcher) {
+async function geminiCompletion(key, model, request, fetcher, timeout) {
   const response = await fetcher(geminiBaseUrl + encodeURIComponent(model) + ':generateContent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-    signal: AbortSignal.timeout(14_000),
+    signal: AbortSignal.timeout(timeout),
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: request.messages[0].content }] },
       contents: [{ role: 'user', parts: [{ text: request.messages[1].content }] }],
@@ -63,7 +66,8 @@ async function geminiCompletion(key, model, request, fetcher) {
     const body = await response.json().catch(() => null);
     const details = body?.error?.details;
     const reason = Array.isArray(details) ? details.find(item => item?.reason === 'API_KEY_INVALID')?.reason : undefined;
-    throw unavailable(response.status, reason);
+    const retryAfter = response.headers.get('Retry-After');
+    throw unavailable(response.status, reason, /^\d+$/.test(retryAfter ?? '') ? Number(retryAfter) : undefined);
   }
   const body = await response.json();
   const calls = body?.candidates?.[0]?.content?.parts?.filter(part => !part.thought && part.functionCall)
@@ -73,20 +77,36 @@ async function geminiCompletion(key, model, request, fetcher) {
   if (calls?.length !== 1 || !request.tools.some(tool => tool.function.name === calls[0].function.name)) {
     throw unavailable(502);
   }
-  return { provider: 'Gemini', choices: [{ message: { tool_calls: calls } }] };
+  return { provider: 'Gemini', model, choices: [{ message: { tool_calls: calls } }] };
 }
 
 export function createAIProvider({ geminiKey, geminiModel = defaultGeminiModel, openai }, { fetcher = fetch, fallback } = {}) {
   const client = fallback ?? (openai.apiKey ? new OpenAI({ apiKey: openai.apiKey, timeout: 14_000, maxRetries: 0 }) : null);
+  const unavailableModels = new Map();
+  const models = geminiModel === defaultGeminiModel
+    ? [defaultGeminiModel, legacyGeminiLite, currentGeminiModel]
+    : [...new Set([geminiModel, backupGeminiModel])];
   return { chat: { completions: { async create(request) {
     const attempts = [];
     if (geminiKey) {
-      const models = [...new Set([geminiModel, backupGeminiModel])];
+      const deadline = Date.now() + geminiTimeout;
       for (const model of models) {
-        try { return await geminiCompletion(geminiKey, model, request, fetcher); }
+        const recentFailure = unavailableModels.get(model);
+        if (recentFailure?.until > Date.now()) {
+          attempts.push(failedAttempt('Gemini', recentFailure));
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        try { return await geminiCompletion(geminiKey, model, request, fetcher, remaining); }
         catch (error) {
           attempts.push(failedAttempt('Gemini', error));
-          if (error?.status !== 404) break;
+          if (error?.status === 429) {
+            const delay = Math.min(60, Math.max(5, error.retryAfter ?? 15)) * 1000;
+            unavailableModels.set(model, { status: 429, until: Date.now() + delay });
+          } else if (error?.status === 404) {
+            unavailableModels.set(model, { status: 404, until: Date.now() + 15 * 60_000 });
+          } else break;
         }
       }
     }
