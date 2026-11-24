@@ -104,10 +104,8 @@ export function connection({ clinic, attempted, csrf, webhook }) {
   const version = hidden('versao', attempted?.versao ?? clinic.versao);
   const name = input(source, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"');
   const draftSettings = connected ? '' : '<form class="card form-card" method="post" action="' + url + '">' +
-    heading('Nome e agenda', 'Você pode usar o link de agenda no simulador antes de conectar um CRM.') +
-    hidden('_csrf', csrf) + version + hidden('configuracao', 'rascunho') + name +
-    input({ agenda_rascunho: source.agendamento_url }, 'agenda_rascunho', 'Link de agendamento (opcional)', 'url') +
-    '<footer class="form-footer"><button>Salvar nome e agenda</button></footer></form>';
+    heading('Nome da clínica') + hidden('_csrf', csrf) + version + hidden('configuracao', 'rascunho') + name +
+    '<footer class="form-footer"><button>Salvar nome</button></footer></form>';
   return webhookPanel + draftSettings + '<form class="card form-card" method="post" action="' + url + '">' +
     heading(connected ? 'Dados da conexão' : 'Conectar CRM', connected ? '' :
       'Preencha estes campos quando quiser habilitar o atendimento pelo CRM.') +
@@ -121,8 +119,7 @@ export function connection({ clinic, attempted, csrf, webhook }) {
       '<small>Use de 32 a 128 caracteres URL-safe.</small></div>' : '') +
     input(source, 'funil_id', 'ID do funil', 'text', ' required') +
     input(source, 'etapa_agendamento_id', 'ID da etapa de agendamento', 'text', ' required') +
-    input(source, 'responsavel_id', 'ID do responsável pelo transbordo', 'text', ' required') +
-    input(source, 'agendamento_url', 'URL de agendamento', 'url', ' required') + '</div>' +
+    input(source, 'responsavel_id', 'ID do responsável pelo transbordo', 'text', ' required') + '</div>' +
     (connected ? '<div class="field clinic-toggle"><label for="ativo">Status do atendimento</label>' +
       '<select id="ativo" name="ativo"><option value="sim"' +
       (source.ativo === true || source.ativo === 'sim' ? ' selected' : '') + '>Ativa</option><option value="nao"' +
@@ -213,7 +210,7 @@ export function tester(clinic, csrf) {
   const action = clinic ? adminUrl(clinic.id, undefined, 'simular') : '/admin/simular?modo=rapido';
   return '<section class="card chat">' + heading('Simulador de atendimento', clinic
     ? 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.'
-    : 'Informe o nome da clínica para testar com respostas genéricas, sem cadastrar CRM ou agenda.') +
+    : 'Informe o nome da clínica para testar com respostas genéricas, sem conectar um CRM.') +
     (clinic ? '<p><a href="/admin/treinar?aba=teste&amp;modo=rapido">Simular só com o nome</a></p>' : '') +
     '<div class="chat-log" data-chat-log role="log" aria-label="Conversa de teste"><p class="muted" data-empty>' +
     'Envie uma mensagem para iniciar o teste.</p></div><form data-simulator action="' +

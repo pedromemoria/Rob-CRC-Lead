@@ -4,12 +4,15 @@ import { safeReply } from './knowledge.js';
 
 export const replies = {
   acolher: 'Oi! Que bom falar com você. O que você está buscando?',
-  convidar: 'Quer que eu te envie o link para escolher um horário?',
-  avaliacao: 'Entendo sua dúvida. Podemos conversar sobre o seu caso com calma na sessão. Quer que eu te envie o link para agendar?',
-  sem_informacao: 'Posso te ajudar a agendar uma conversa com a equipe para esclarecer isso. Quer que eu te envie o link?'
+  convidar: 'Quer que eu encaminhe seu pedido de agendamento à equipe?',
+  avaliacao: 'Entendo sua dúvida. Podemos conversar sobre o seu caso com calma na sessão. Quer que eu encaminhe seu pedido de agendamento à equipe?',
+  sem_informacao: 'Essa informação ainda não está disponível. Quer que eu encaminhe seu pedido de agendamento?'
 };
 
+export const bookingHandoffReply = 'Vou encaminhar seu pedido de agendamento. A equipe da clínica vai confirmar os horários com você.';
+
 export const handoffReasons = {
+  agendamento: 'O lead quer agendar. Entre em contato, confira a disponibilidade e conclua o agendamento no ERP da clínica.',
   humano: 'O lead solicitou atendimento humano.',
   irritacao: 'O lead demonstrou insatisfação com o atendimento.',
   fora_escopo: 'A conversa saiu do escopo do atendimento comercial.',
@@ -38,7 +41,7 @@ const prompt = [
   'Jamais diagnostique, avalie casos ou prescreva soluções técnicas, clínicas ou financeiras. Encaminhe qualquer pedido assim para a resposta avaliacao.',
   'Para dados operacionais, serviços, preços, duração, pagamento e convênios, dê prioridade ao cadastro oficial dados_da_clinica. Escolha em respostas_disponiveis o ID cadastro_ que corresponda à pergunta e à pessoa ou ao serviço citado. Não adivinhe o serviço. Quando o cadastro não cobrir a pergunta, uma resposta publicada da base pode ser usada. Se faltar informação, use sem_informacao.',
   'Para diferenciais, regras e orientações gerais de preparo de exames, selecione uma resposta cadastro_observacao_ diretamente pertinente. Nunca adapte preparo ao caso individual, recomende medicação ou interprete resultados.',
-  'O URL do Maps serve apenas como referência interna. Nunca inclua outros links na conversa. A aplicação entrega o link de agendamento depois do aceite.',
+  'O URL do Maps serve apenas como referência interna. Nunca envie ou prometa links, reserve horários ou sugira autoagendamento. A equipe da clínica confirma os horários e conclui o agendamento no ERP.',
   'Se o lead pedir humano, estiver irritado ou sair completamente do escopo, priorize transbordo_humano. Para pedidos de interromper contato, use descadastro.',
   'Use qualificar_agendamento somente com pedido ou aceitação inequívoca de agendamento na mensagem atual. Se for um sim curto, exija que a última resposta tenha sido uma oferta explícita de agendamento.',
   'Não trate pergunta sobre o serviço, negação, adiamento ou interesse hipotético como aceitação. Nunca confirme reserva ou disponibilidade.',
@@ -62,6 +65,11 @@ export function explicitHandoff(text) {
 
 export function wantsAssessment(text) {
   return /\b(?:diagnostic[oa]r?|diagnostique|prescreva|prescrever|analise meu caso|avali[ae] (?:o )?meu caso|da[r]? um parecer|o que devo tomar|qual remedio (?:devo|eu))\b/.test(text);
+}
+
+export function mentionsOnlineBooking(text) {
+  return typeof text === 'string' &&
+    /\b(?:links?|autoagendamento|agendamento (?:online|automatico)|agend[ae] pelo site|escolh(?:a|e|er) um horario|escolh(?:a|e|er) entre os horarios)\b/.test(normalize(text));
 }
 
 function asksAboutBooking(text) {
@@ -98,7 +106,8 @@ export function createAgent(config, client = new OpenAI({
     const assessment = wantsAssessment(lead);
     const { files, replies: approved, clinicData } = knowledge;
     const facts = clinicFacts(clinicData);
-    const options = new Map([...approved, ...facts, ...Object.entries(replies)]);
+    const options = new Map([...approved, ...facts, ...Object.entries(replies)]
+      .filter(([, answer]) => !mentionsOnlineBooking(answer)));
     const last = history.at(-1);
     const result = await client.chat.completions.create({
       model: config.model, temperature: 0, store: false, max_completion_tokens: 300,
@@ -119,7 +128,7 @@ export function createAgent(config, client = new OpenAI({
       tool_choice: 'required',
       tools: [
         tool('responder', 'Seleciona uma resposta curta e publicada, sem editar o texto.', { resposta_id: string }),
-        tool('qualificar_agendamento', 'Move o card e entrega a agenda. Cite literalmente a mensagem atual que prova o aceite.', { trecho: string }),
+        tool('qualificar_agendamento', 'Move o card e encaminha o interesse à equipe para agendar no ERP. Cite literalmente a mensagem atual que prova o aceite.', { trecho: string }),
         tool('transbordo_humano', 'Pausa a IA e cria uma tarefa para a equipe.', {
           motivo: choice(['humano', 'irritacao', 'fora_escopo', 'descadastro'])
         })
@@ -146,11 +155,12 @@ export function createAgent(config, client = new OpenAI({
     const matched = matchClinicFact(clinicData, facts, event.text, last?.inbound) ??
       matchClinicObservation(clinicData, facts, event.text);
     const selectedId = call?.name === 'responder' && typeof args.resposta_id === 'string' ? args.resposta_id : '';
-    const official = facts.get(selectedId);
+    const official = options.has(selectedId) ? facts.get(selectedId) : null;
     const selected = official
       ? (canSelectClinicFact(clinicData, selectedId, event.text, last?.inbound) ? official : replies.sem_informacao)
       : options.get(selectedId);
-    const text = matched ?? (official || safeReply(selected) ? selected : replies.convidar);
+    const text = matched && !mentionsOnlineBooking(matched) ? matched :
+      (official || safeReply(selected) ? selected : replies.convidar);
     return { kind: 'responder', text,
       offer: offersBooking(text) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(text) };
   };

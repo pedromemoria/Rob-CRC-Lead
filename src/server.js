@@ -58,10 +58,12 @@ export async function start() {
       " EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sdr'" +
       " AND table_name = 'clinicas' AND column_name = 'dados_publicos') AS clinic_data_column," +
       " EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sdr'" +
-      " AND table_name = 'clinicas' AND column_name = 'crm_tipo' AND is_nullable = 'YES') AS draft_ready"
+      " AND table_name = 'clinicas' AND column_name = 'crm_tipo' AND is_nullable = 'YES') AS draft_ready," +
+      " EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('sdr.clinicas')" +
+      " AND conname='clinicas_configuracao_crm_erp') AS erp_ready"
     );
     if (!Object.values(schema).every(Boolean)) {
-      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql, supabase/admin-saas.sql, supabase/contas-admin.sql, supabase/dados-clinicas.sql e supabase/cadastro-rapido.sql no SQL Editor antes de iniciar.');
+      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql, supabase/admin-saas.sql, supabase/contas-admin.sql, supabase/dados-clinicas.sql, supabase/cadastro-rapido.sql e supabase/agendamento-erp.sql no SQL Editor antes de iniciar.');
     }
     clinics = createClinics(pool, config, fileURLToPath(new URL('../knowledge/', import.meta.url)));
   } catch (error) {

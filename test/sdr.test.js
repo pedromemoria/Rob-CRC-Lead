@@ -16,11 +16,10 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
 import { createWorker } from '../src/worker.js';
-import { createAgent, replies } from '../src/agent.js';
+import { bookingHandoffReply, createAgent, replies } from '../src/agent.js';
 import { createApp } from '../src/server.js';
 import { createCrms, OpportunityError } from '../src/crm.js';
 
-const bookingUrl = 'https://agenda.example.com/consulta';
 const adminToken = 'a'.repeat(64);
 const webhookToken = 'b'.repeat(64);
 const templateDir = fileURLToPath(new URL('../knowledge/', import.meta.url));
@@ -28,21 +27,24 @@ const clinicForm = (type, account, fields = {}) => ({
   nome_clinica: 'Clínica ' + account, crm_tipo: type, crm_account_id: account,
   kommo_conta_id: '100', crm_token: 'token-secret-' + account, webhook_token: webhookToken,
   funil_id: '8', etapa_agendamento_id: '13', responsavel_id: '15',
-  agendamento_url: bookingUrl, regras_negocio: '', quebra_objecoes: '', faq: '# FAQ\n', ...fields
+  regras_negocio: '', quebra_objecoes: '', faq: '# FAQ\n', ...fields
 });
 
 const schema = readFileSync(new URL('../supabase/schema.sql', import.meta.url), 'utf8');
 
-async function database(dataDir) {
+async function database(dataDir, migrate = true) {
   const db = new PGlite(dataDir);
   const client = Object.assign(new EventEmitter(), { query: db.query.bind(db), release() {} });
-  await db.exec(schema);
-  await db.exec(readFileSync(new URL('../supabase/multi-clinica.sql', import.meta.url), 'utf8'));
-  await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
-  await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
-  await db.exec(readFileSync(new URL('../supabase/contas-admin.sql', import.meta.url), 'utf8'));
-  await db.exec(readFileSync(new URL('../supabase/dados-clinicas.sql', import.meta.url), 'utf8'));
-  await db.exec(readFileSync(new URL('../supabase/cadastro-rapido.sql', import.meta.url), 'utf8'));
+  if (migrate) {
+    await db.exec(schema);
+    await db.exec(readFileSync(new URL('../supabase/multi-clinica.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/contas-admin.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/dados-clinicas.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/cadastro-rapido.sql', import.meta.url), 'utf8'));
+    await db.exec(readFileSync(new URL('../supabase/agendamento-erp.sql', import.meta.url), 'utf8'));
+  }
   return {
     query: client.query,
     connect: async () => client,
@@ -100,6 +102,10 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   const feedback = ['Priorize o preço publicado quando houver uma pergunta direta.'];
   assert.equal((await decide({ text: 'Qual o preço?' }, [], { ...knowledge, feedback })).text, 'A consulta custa R$ 120,00.');
   assert.deepEqual(modelContext.feedbacks_da_clinica, feedback);
+  knowledge.replies.set('convite_antigo', 'Quer receber o link para escolher um horário?');
+  result = modelResult('responder', { resposta_id: 'convite_antigo' });
+  assert.equal((await decide({ text: 'Como faço para agendar?' }, [], knowledge)).text, replies.convidar);
+  assert.equal(modelContext.respostas_disponiveis.convite_antigo, undefined);
   assert.equal(safeReply('Acesse teste.com'), false);
   assert.equal(safeReply('Acesse 127.0.0.1'), false);
   assert.equal(safeReply('Acesse ｈｔｔｐ．com'), false);
@@ -239,13 +245,12 @@ function event(eventId, clinicId, account = 'branch', text = 'Quero agendar') {
   return { clinicId, provider: 'ghl', account, leadId: '99', eventId, conversationId: '11', text };
 }
 
-test('fila usa treinamento, credenciais, links, histórico e pausas de cada clínica', async t => {
+test('fila usa treinamento, credenciais, tarefas, histórico e pausas de cada clínica', async t => {
   const { clinics, store, db } = await fixture(t);
   const documents = createDocuments(db);
   const faq = name => '<!-- respostas:sdr -->\nresposta | Conhecimento ' + name + '.\n<!-- fim:sdr -->';
   const first = await clinics.save(clinicForm('ghl', 'a', { faq: faq('Alfa') }));
-  const secondBooking = 'https://outra.example.com/consulta';
-  const second = await clinics.save(clinicForm('ghl', 'b', { faq: faq('Beta'), agendamento_url: secondBooking }));
+  const second = await clinics.save(clinicForm('ghl', 'b', { faq: faq('Beta') }));
   const feedback = createFeedback(db);
   await feedback.save(first, 'Feedback Alfa');
   await feedback.save(second, 'Feedback Beta');
@@ -254,8 +259,9 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
     ghl: {
       async qualify(e) { actions.push(['qualify', e.clinicId, integration.ghl.token]); },
       async send(e, text) { actions.push(['send', e.clinicId, text]); },
-      async handoff(e) {
+      async handoff(e, note) {
         assert.equal(await store.paused(e.clinicId, leadKey(e)), true);
+        assert.match(note, e.text === 'Humano' ? /atendimento humano/ : /agendamento no ERP/);
         actions.push(['handoff', e.clinicId]);
       }
     }
@@ -273,18 +279,20 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
   const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor, documents, feedback });
   const a = event('1', first, 'a');
   const b = event('1', second, 'b');
-  await store.enqueue([a, event('2', first, 'a', 'Humano'), event('3', first, 'a'), b]);
+  await store.enqueue([a, event('3', first, 'a'), { ...event('2', first, 'a', 'Humano'), leadId: '100' }, b]);
   for (let i = 0; i < 4; i++) await worker.tick();
   assert.deepEqual(actions, [
     ['qualify', first, 'token-secret-a'],
-    ['send', first, 'Perfeito! Escolha o melhor horário por aqui:\n' + bookingUrl],
+    ['handoff', first],
+    ['send', first, bookingHandoffReply],
     ['handoff', first],
     ['qualify', second, 'token-secret-b'],
-    ['send', second, 'Perfeito! Escolha o melhor horário por aqui:\n' + secondBooking]
+    ['handoff', second],
+    ['send', second, bookingHandoffReply]
   ]);
   assert.equal(await store.resume(second, leadKey(a)), false);
   assert.equal(await store.resume(first, leadKey(a)), true);
-  assert.equal(await store.paused(second, leadKey(b)), false);
+  assert.equal(await store.paused(second, leadKey(b)), true);
 });
 
 test('reinício preserva clínica, pausa e recuperação de fila com efeito incerto', async t => {
@@ -303,7 +311,7 @@ test('reinício preserva clínica, pausa e recuperação de fila com efeito ince
   await before.startEffect(handoff);
   await original.close();
 
-  const restarted = await database(dir);
+  const restarted = await database(dir, false);
   t.after(async () => {
     await restarted.close();
     rmSync(dir, { recursive: true, force: true });
@@ -451,7 +459,8 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.deepEqual(noAI.sources, ['atendimento.txt']);
   assert.equal(noAI.feedbackCount, 1);
   const appointment = await (await simulation(first, false, 'Eu quero agendar')).json();
-  assert.match(appointment.reply, /https:\/\/agenda.example.com/);
+  assert.equal(appointment.reply, bookingHandoffReply);
+  assert.equal(appointment.action, 'Encaminhar para agendamento no ERP');
   assert.equal((await simulation(first, true)).status, 200);
   assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
@@ -522,8 +531,8 @@ test('credenciais personalizadas substituem o fallback e sessões vencidas são 
   const appointment = await (await quick('Clínica de teste', 'Sim', [{
     inbound: 'Quanto custa a consulta?', outbound: pricing.reply, offered: pricing.offered
   }])).json();
-  assert.match(appointment.reply, /ainda não tem um link de agenda/);
-  assert.equal(appointment.action, 'Agendamento simulado');
+  assert.equal(appointment.reply, bookingHandoffReply);
+  assert.equal(appointment.action, 'Encaminhar para agendamento no ERP');
   assert.deepEqual(appointment.sources, []);
   await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
   assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
@@ -726,11 +735,13 @@ test('clínica criada só com nome pode ser treinada e simulada antes de conecta
   assert.match((await sim('Tem estacionamento?', true)).reply, /Estacionamento gratuito/);
   assert.equal(modelContext.dados_da_clinica.observacoes, notes);
   assert.equal(modelContext.base_de_conhecimento['regras_negocio.md'], 'Acolha com cuidado.');
-  assert.match((await sim('Quero agendar')).reply, /ainda não tem um link/);
+  assert.equal((await sim('Quero agendar')).reply, bookingHandoffReply);
   const connectionUrl = view + '&aba=conexao';
-  assert.equal((await post(connectionUrl, { versao: await version(), nome_clinica: draft.nome_clinica,
-    configuracao: 'rascunho', agenda_rascunho: bookingUrl })).status, 303);
-  assert.match((await sim('Quero agendar')).reply, /https:\/\/agenda.example.com/);
+  const connection = await (await fetch(base + connectionUrl, { headers })).text();
+  assert.doesNotMatch(connection, /name="agendamento_url"|nome e agenda|link de agendamento/i);
+  assert.equal((await post(connectionUrl, { versao: await version(), nome_clinica: 'Clínica Renomeada',
+    configuracao: 'rascunho' })).status, 303);
+  assert.equal((await clinics.get(draft.id)).nome_clinica, 'Clínica Renomeada');
   assert.equal((await clinics.get(draft.id)).crm_tipo, null);
   const fields = clinicForm('kommo', 'draft-account', { nome_clinica: draft.nome_clinica });
   assert.equal((await post(connectionUrl, { ...fields, versao: await version(), crm_token: '' })).status, 422);
@@ -749,4 +760,55 @@ test('clínica criada só com nome pode ser treinada e simulada antes de conecta
   await store.enqueue([{ ...event('clinic-observation', draft.id, 'draft-account', 'Tem estacionamento?'), provider: 'kommo' }]);
   await worker.tick();
   assert.deepEqual(sent, ['Orientação da clínica: Estacionamento gratuito na lateral.']);
+});
+
+test('retentativa de agendamento mantém a tarefa única e nunca envia o link antigo', async t => {
+  const { clinics, store, db } = await fixture(t);
+  const id = await clinics.save(clinicForm('ghl', 'erp'));
+  await db.query("UPDATE sdr.clinicas SET agendamento_url='https://agenda.example.com/antiga' WHERE id=$1", [id]);
+  const input = event('erp-legacy', id, 'erp');
+  await store.enqueue([input]);
+  const legacy = await store.claim();
+  await store.plan(legacy, { kind: 'qualificar_agendamento' }, 'send');
+  await store.fail(legacy, 'queued', 'retry');
+  const actions = [];
+  let attempts = 0;
+  const worker = createWorker({ store, integrationFor: clinics.integration, decide: async () => assert.fail('decisão já persistida'),
+    logger: { error() {} }, crmFor: () => ({
+      ghl: {
+        qualify: async () => assert.fail('oportunidade já movida'),
+        handoff: async (input, reason) => actions.push(reason),
+        send: async (input, text) => {
+          attempts++;
+          assert.equal(text, bookingHandoffReply);
+          if (attempts === 1) throw Object.assign(new Error('Falha de envio'), { status: 403 });
+        }
+      }
+    })
+  });
+  await worker.tick();
+  assert.equal(attempts, 1);
+  const [blocked] = await store.pending(id);
+  assert.equal(blocked.step, 'send');
+  assert.equal(await store.resume(id, leadKey(input)), false);
+  assert.equal(await store.resolve(id, blocked.seq, 'tentar'), true);
+  await worker.tick();
+  assert.equal(attempts, 2);
+  assert.equal(actions.length, 1);
+  assert.match(actions[0], /agendamento no ERP/);
+  assert.deepEqual(await store.pending(id), []);
+  assert.equal(await store.paused(id, leadKey(input)), true);
+
+  await store.enqueue([{ ...event('erp-sem-card', id, 'erp'), leadId: '101' }]);
+  const withAmbiguity = createWorker({
+    store, integrationFor: clinics.integration, decide: async () => ({ kind: 'qualificar_agendamento' }),
+    crmFor: () => ({ ghl: {
+      qualify: async () => { throw new OpportunityError(); },
+      handoff: async (input, reason) => actions.push(reason),
+      send: async (input, text) => assert.equal(text, bookingHandoffReply)
+    } })
+  });
+  await withAmbiguity.tick();
+  assert.match(actions[1], /agendamento no ERP.*Confira o card/);
+  assert.deepEqual(await store.pending(id), []);
 });

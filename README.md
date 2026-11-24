@@ -1,8 +1,10 @@
 # Rob-CRC-Lead
 
-Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 24 com Express, OpenAI e Supabase. Cada clínica usa uma conta CRM, seu próprio funil, link de agendamento e treinamento.
+Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 24 com Express, OpenAI e Supabase. Cada clínica usa uma conta CRM, seu próprio funil, equipe responsável e treinamento.
 
 ## Atualizar o Supabase
+
+Aplique [supabase/agendamento-erp.sql](supabase/agendamento-erp.sql) após as migrações abaixo para conectar o CRM sem precisar de um link de agendamento.
 
 Aplique [supabase/cadastro-rapido.sql](supabase/cadastro-rapido.sql) depois das migrações abaixo para criar clínicas só com o nome.
 
@@ -14,7 +16,7 @@ Aplique [supabase/contas-admin.sql](supabase/contas-admin.sql) depois das migra�
 - **Painel com biblioteca já instalado** — Execute [supabase/admin-saas.sql](supabase/admin-saas.sql) antes do deploy. O script adiciona sessões, feedbacks e status de atendimento.
 - **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql), [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql).
 
-A migração pode ser repetida e preserva os registros anteriores. Eventos, pausas e treinamento do sistema anterior permanecem no banco sem associação automática a uma clínica. Cadastre as clínicas e copie para cada cadastro apenas os textos que pertencem a ela. Os webhooks antigos devem ser atualizados para as novas rotas.
+Aplique cada migração uma vez, na ordem indicada. As migrações preservam os registros anteriores. Eventos, pausas e treinamento do sistema anterior permanecem no banco sem associação automática a uma clínica. Cadastre as clínicas e copie para cada cadastro apenas os textos que pertencem a ela. Os webhooks antigos devem ser atualizados para as novas rotas.
 
 ## Render Free
 
@@ -28,7 +30,7 @@ No serviço existente, abra **Environment**. Preencha estas três variáveis e c
 
 Abra `https://SEU-SERVICO.onrender.com/health` e confirme `{"status":"ok"}`. Em um Web Service configurado manualmente, use runtime Node, plano Free, branch main, `NODE_VERSION=24.x`, build `npm ci --omit=dev`, start `npm start` e Health Check Path `/health`. O serviço usa `PORT` do Render, com fallback para 3000.
 
-O CRM e o link da agenda são configurados no painel. As variáveis fixas antigas dos CRMs e `AGENDAMENTO_URL` podem ser removidas do Render. Se necessário, use `DATABASE_SSL_CA` para fornecer o certificado CA do banco em PEM ou `GHL_WEBHOOK_PUBLIC_KEY` para substituir a chave oficial Ed25519 do GoHighLevel.
+O CRM é configurado no painel. As variáveis fixas antigas dos CRMs e `AGENDAMENTO_URL` podem ser removidas do Render. Se necessário, use `DATABASE_SSL_CA` para fornecer o certificado CA do banco em PEM ou `GHL_WEBHOOK_PUBLIC_KEY` para substituir a chave oficial Ed25519 do GoHighLevel.
 
 ### Chave de criptografia dos tokens
 
@@ -48,7 +50,7 @@ Uma conta de equipe pode editar o treinamento, os feedbacks e os arquivos da cl�
 
 1. Abra `/admin/treinar` no domínio do serviço. O painel leva à página de login. Enquanto o par personalizado estiver incompleto ou inválido, use **admin@robocrc.local** e o valor atual de `ADMIN_TOKEN` como senha. Para personalizar, configure os dois campos em **Render → Environment**, com e-mail válido e senha de 8 a 1.024 caracteres. A sessão usa cookie HTTPS com duração de 8 horas. **Sair** encerra a sessão atual.
 2. Clique em **+ Nova Clínica**, informe o nome e salve. As abas ficam disponíveis na hora. A clínica aparece como **Em configuração** até conectar um CRM.
-3. Em **Conexão & CRM**, você pode salvar apenas o link HTTPS da agenda para testar. Para ativar o atendimento, escolha Kommo ou GoHighLevel e informe a conta, o token, os IDs de funil, etapa e responsável, além do link da agenda. A conta e o provedor ficam fixos após conectar. Clique em **Copiar Link** para configurar o webhook.
+3. Em **Conexão & CRM**, escolha Kommo ou GoHighLevel e informe a conta, o token, os IDs de funil, a etapa de agendamento e o responsável. A conta e o provedor ficam fixos após conectar. Clique em **Copiar Link** para configurar o webhook.
 4. Configure a URL no CRM e valide um evento por clínica. A fila, o histórico e a operação ficam separados por clínica. O login administrativo é central e gerencia todos os cadastros. Use a busca da barra lateral para localizar uma clínica. Em **Conexão & CRM**, o status **Inativa** suspende novos eventos e deixa os já enfileirados aguardando reativação. Um evento já em processamento pode concluir.
 
 ### Kommo
@@ -87,7 +89,7 @@ O preço acima é apenas um exemplo de formatação. Publique somente dados come
 
 Em **Informações da Clínica**, cadastre endereço, referência, horário, telefone, profissionais e serviços. Cada serviço pode ter valor ou faixa, duração, formas de pagamento e convênios. Use **Adicionar** ou **Remover** conforme necessário e clique em **Salvar informações**. O formulário aceita até 20 profissionais e 20 serviços por clínica. Em **Observações gerais**, inclua diferenciais, regras e orientações de preparo que podem ser compartilhadas. Use uma orientação por linha, com até 320 caracteres por linha.
 
-O simulador e o atendimento real carregam o cadastro da clínica junto ao treinamento, feedbacks e documentos. Quando a pergunta identifica um dado cadastrado, ele tem prioridade na resposta. O link oficial do Google Maps pode ser aberto no painel. Pelo chat, o robô informa o endereço cadastrado e envia o link de agendamento após o aceite.
+O simulador e o atendimento real carregam o cadastro da clínica junto ao treinamento, feedbacks e documentos. Quando a pergunta identifica um dado cadastrado, ele tem prioridade na resposta. O link oficial do Google Maps pode ser aberto no painel. Pelo chat, o robô informa o endereço cadastrado e encaminha o pedido de agendamento à equipe.
 
 ## Feedbacks, arquivos e simulador
 
@@ -95,13 +97,13 @@ O simulador e o atendimento real carregam o cadastro da clínica junto ao treina
 
 - Na aba **Arquivos (Base de Conhecimento)**, **Treinamento & Prompts** ou **Feedbacks & Aprendizado**, envie PDF, DOCX, TXT ou CSV. Você pode arrastar um arquivo ou selecioná-lo. O painel lista nome e data e permite visualizar o texto extraído ou excluir o documento. São aceitos até 5 MB por arquivo, 160 KB de texto extraído e 30 arquivos por clínica. PDFs escaneados precisam passar por OCR antes do envio.
 - O Supabase guarda o texto extraído por clínica. O agente consulta até quatro trechos relevantes dos documentos junto com o treinamento. Para autorizar uma frase que possa ser enviada ao lead, coloque-a em um bloco de respostas aprovadas no treinamento.
-- Para uma simulação rápida, abra **Simular atendimento** no menu lateral e preencha apenas o nome da clínica. Esse teste usa respostas genéricas, sem criar cadastros, acionar o CRM ou gerar links de agendamento.
+- Para uma simulação rápida, abra **Simular atendimento** no menu lateral e preencha apenas o nome da clínica. Esse teste usa respostas genéricas, sem criar cadastros ou acionar o CRM.
 - Para usar dados e treinamento salvos, selecione uma clínica cadastrada no simulador e mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI e verificar a aplicação dos feedbacks. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
 
 ## Operar o agente
 
 - **Resposta.** O GPT-4o escolhe entre `responder`, `qualificar_agendamento` e `transbordo_humano`. O servidor só aceita uma ferramenta por mensagem e produz a saída usando frases fixas ou publicadas. Para pedidos de avaliação conhecidos, há também redirecionamento programático para a sessão.
-- **Agendamento.** A decisão requer evidência literal da mensagem atual, validada pelo servidor. Um aceite curto exige oferta de agenda no turno anterior da mesma conversa. Depois da qualificação no CRM, o servidor insere o link da clínica. A confirmação de reserva ocorre na página da agenda.
+- **Agendamento.** A decisão requer evidência literal da mensagem atual, validada pelo servidor. Um aceite curto exige oferta de agenda no turno anterior da mesma conversa. Depois de mover a oportunidade no CRM, o robô pausa a conversa, cria uma tarefa para o responsável e avisa o lead do encaminhamento. A equipe confirma os horários e registra o agendamento no ERP.
 - **Transbordo.** Ao detectar pedido de humano, irritação, assunto totalmente fora do escopo, descadastro ou evento sem texto, o servidor pausa o lead e cria tarefa atribuída no CRM. A equipe assume a conversa. Para voltar à IA, selecione a clínica em `/admin/operacao`. A reativação limpa o contexto da conversa e descarta mensagens enfileiradas durante a pausa.
 - **Falhas.** O webhook retorna sucesso após gravar o evento na fila. A fila deduplica por clínica, provedor, conta e ID da mensagem. Etapas concluídas ficam registradas antes do próximo efeito. Quando a criação de uma mensagem ou tarefa tem resultado incerto, confira o CRM em `/admin/operacao` antes de escolher **Tentar novamente**. Se o CRM já registrou o efeito ou a equipe decidiu assumir, escolha **Encerrar evento**. Um evento pendente impede que eventos seguintes do mesmo lead avancem e permite que outros leads continuem.
 - **Dados.** A IA usa até 12 interações recentes por conversa, mantidas por até 30 dias. O corpo dos eventos concluídos é apagado da fila e a chave de deduplicação permanece. Eventos pendentes retêm o conteúdo até resolução. Proteja o banco e seus backups como dados de atendimento. O GPT-4o recebe a base, o texto e o contexto da conversa, com `store: false` na solicitação.

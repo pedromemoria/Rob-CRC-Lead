@@ -62,7 +62,7 @@ export function createStore(database) {
       await transaction(database, async client => {
         await client.query('UPDATE sdr.jobs SET plan = $1, step = $2, effect = false WHERE seq = $3',
           [plan, step, job.seq]);
-        if (plan.kind === 'transbordo_humano') {
+        if (step === 'handoff') {
           await client.query('INSERT INTO sdr.paused(lead,clinica_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [job.lead, job.clinica_id]);
         }
       });
@@ -138,7 +138,8 @@ export function createStore(database) {
         const paused = await client.query('SELECT 1 FROM sdr.paused WHERE lead = $1 AND clinica_id = $2', [lead, clinicId]);
         if (!paused.rowCount) return false;
         const pending = await client.query(
-          "SELECT 1 FROM sdr.jobs WHERE lead = $1 AND clinica_id = $2 AND step = 'handoff' AND state <> 'done' LIMIT 1", [lead, clinicId]
+          "SELECT 1 FROM sdr.jobs WHERE lead = $1 AND clinica_id = $2 AND (step = 'handoff' OR (step = 'send' AND plan->>'kind' = 'qualificar_agendamento'))" +
+          " AND state <> 'done' LIMIT 1", [lead, clinicId]
         );
         if (pending.rowCount) return false;
         await client.query(clear + " WHERE lead = $1 AND clinica_id = $2 AND state = 'queued'", [lead, clinicId]);

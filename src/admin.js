@@ -187,7 +187,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
         return res.redirect(303, adminUrl(id, 'dados') + '&salvo=clinic');
       }
       if (clinic && !clinic.crm_tipo && req.body?.configuracao === 'rascunho') {
-        await clinics.saveDraftSettings({ ...req.body, agendamento_url: req.body.agenda_rascunho }, clinic);
+        await clinics.saveDraftSettings(req.body, clinic);
         return res.redirect(303, adminUrl(clinic.id, 'conexao') + '&salvo=clinic');
       }
       const fields = { ...req.body, ...Object.fromEntries(trainingFields.map(name => [
@@ -197,9 +197,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       res.redirect(303, adminUrl(id, 'conexao') + '&salvo=clinic');
     } catch (error) {
       if (!(error instanceof ClinicError)) throw error;
-      const attempted = req.body?.configuracao === 'rascunho'
-        ? { ...req.body, agendamento_url: req.body.agenda_rascunho } : req.body;
-      return renderPanel(req, res, { message: error.message, status: 422, attempted });
+      return renderPanel(req, res, { message: error.message, status: 422, attempted: req.body });
     }
   });
 
@@ -281,7 +279,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       knowledge = { clinicName: name, files: {}, replies: new Map(), references: [] };
     }
     try {
-      res.json(await simulate({ clinic, text: text.trim(), history, withAI, decide, knowledge }));
+      res.json(await simulate({ text: text.trim(), history, withAI, decide, knowledge }));
     } catch (error) {
       if (!withAI) throw error;
       const message = [401, 403, 429].includes(error.status)

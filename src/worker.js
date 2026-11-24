@@ -1,7 +1,7 @@
 import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
-import { handoffReasons } from './agent.js';
+import { bookingHandoffReply, handoffReasons, mentionsOnlineBooking } from './agent.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
 function errorStatus(error) {
@@ -20,7 +20,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     if (integration.provider !== job.event.provider) throw new ClinicError('O CRM do evento não corresponde à clínica.');
     const crm = crmFor(integration)[job.event.provider];
     const officialReplies = new Set(clinicFacts(integration.knowledge.clinicData).values());
-    const allowed = text => safeReply(text) || officialReplies.has(text);
+    const allowed = text => !mentionsOnlineBooking(text) && (safeReply(text) || officialReplies.has(text));
     const needsDecision = !job.plan || (job.plan.kind === 'responder' && !allowed(job.plan.text));
     if (needsDecision) {
       const history = await store.history(job);
@@ -41,20 +41,27 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     if (job.step === 'qualify') {
       try {
         await crm.qualify(job.event);
-        await store.plan(job, job.plan, 'send');
+        await store.plan(job, { ...job.plan, erp: true }, 'handoff');
       } catch (error) {
         if (!(error instanceof OpportunityError)) throw error;
-        await store.plan(job, { kind: 'transbordo_humano', reason: 'oportunidade' }, 'handoff');
+        await store.plan(job, { ...job.plan, erp: true, faltaOportunidade: true }, 'handoff');
       }
     }
+    if (job.step === 'send' && job.plan.kind === 'qualificar_agendamento' && !job.plan.erp) {
+      await store.plan(job, { ...job.plan, erp: true }, 'handoff');
+    }
     if (job.step === 'handoff') {
+      const booking = job.plan.kind === 'qualificar_agendamento';
+      let reason = handoffReasons[booking ? 'agendamento' : job.plan.reason];
+      if (job.plan.faltaOportunidade) reason += ' ' + handoffReasons.oportunidade;
       await store.startEffect(job);
-      await crm.handoff(job.event, handoffReasons[job.plan.reason], job.id.slice(0, 16));
-      return store.finish(job);
+      await crm.handoff(job.event, reason, job.id.slice(0, 16));
+      if (!booking) return store.finish(job);
+      await store.plan(job, job.plan, 'send');
     }
     if (job.step !== 'send') throw new Error('Etapa inválida');
     const text = job.plan.kind === 'qualificar_agendamento'
-      ? 'Perfeito! Escolha o melhor horário por aqui:\n' + integration.bookingUrl
+      ? bookingHandoffReply
       : job.plan.text;
     if (job.plan.kind === 'responder' && !allowed(text)) throw new KnowledgeError('Resposta inválida');
     await store.startEffect(job);

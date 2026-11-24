@@ -7,5 +7,5 @@ Publique somente informações que já possam ser divulgadas.
 
 <!-- respostas:sdr -->
 pergunta_objetivo | Entendi. O que você gostaria de conversar com a equipe na sessão?
-convite_sessao | Podemos conversar sobre isso na sessão. Quer receber o link para escolher um horário?
+convite_sessao | Podemos conversar sobre isso na sessão. Quer que eu encaminhe seu agendamento à equipe?
 <!-- fim:sdr -->
