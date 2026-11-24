@@ -8,6 +8,7 @@ import { EventEmitter, once } from 'node:events';
 import { PGlite } from '@electric-sql/pglite';
 import { safeReply } from '../src/knowledge.js';
 import { clinicKnowledge, createClinics } from '../src/clinics.js';
+import { createAccounts } from '../src/accounts.js';
 import { createSessions } from '../src/admin-auth.js';
 import { createFeedback } from '../src/feedback.js';
 import { createDocuments, extractDocument } from '../src/documents.js';
@@ -39,6 +40,7 @@ async function database(dataDir) {
   await db.exec(readFileSync(new URL('../supabase/multi-clinica.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../supabase/contas-admin.sql', import.meta.url), 'utf8'));
   return {
     query: client.query,
     connect: async () => client,
@@ -479,4 +481,59 @@ test('credenciais personalizadas substituem o fallback e sessões vencidas são 
   assert.equal((await fetch(base + '/admin/treinar', { headers })).status, 200);
   await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
   assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
+});
+
+test('cadastro por e-mail requer convite, isola a clínica e revoga a sessão', async t => {
+  const { clinics, db, store } = await fixture(t);
+  const assigned = await clinics.save(clinicForm('ghl', 'assigned', { nome_clinica: 'Clínica atribuída' }));
+  const other = await clinics.save(clinicForm('ghl', 'other', { nome_clinica: 'Clínica secreta' }));
+  const accounts = createAccounts(db);
+  const server = createApp({ adminToken, ghl: {} }, store, clinics, {
+    accounts, documents: createDocuments(db), feedback: createFeedback(db), sessions: createSessions(db)
+  }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + server.address().port + '/admin';
+  const call = (path, headers, fields) => fetch(base + path, {
+    method: fields ? 'POST' : 'GET', headers, redirect: 'manual',
+    body: fields ? new URLSearchParams(fields) : undefined
+  });
+  const email = 'recepcao@example.com';
+  const senha = 'Senha forte da equipe!';
+  assert.equal((await call('/cadastrar', {}, { email: '  RECEPCAO@example.com  ' })).status, 303);
+  assert.equal((await call('/cadastrar', {}, { email })).status, 303);
+  assert.equal((await call('/login', {}, { email, senha })).status, 401);
+
+  const ownerLogin = await call('/login', {}, { email: 'admin@robocrc.local', senha: adminToken });
+  assert.equal(ownerLogin.status, 303);
+  const owner = { Cookie: ownerLogin.headers.get('set-cookie').split(';')[0] };
+  const requests = await (await call('/contas', owner)).text();
+  assert.match(requests, /Aguardando aprovação/);
+  const ownerCsrf = requests.match(/name="_csrf" value="([^"]+)"/)[1];
+  const id = requests.match(/name="conta" value="([^"]+)"/)[1];
+  const invite = await call('/contas/convidar', owner, { _csrf: ownerCsrf, conta: id, clinica: assigned });
+  assert.equal(invite.status, 200);
+  const token = (await invite.text()).match(/\/admin\/ativar#([a-f0-9]{64})/)[1];
+  const stored = (await db.query('SELECT invitation_hash FROM sdr.admin_accounts WHERE id=$1', [id])).rows[0];
+  assert.notEqual(stored.invitation_hash, token);
+  assert.equal((await call('/ativar', {}, { convite: token, senha: 'curta' })).status, 422);
+  assert.equal((await call('/ativar', {}, { convite: token, senha })).status, 303);
+  assert.equal((await call('/ativar', {}, { convite: token, senha })).status, 422);
+  const session = await call('/login', {}, { email, senha });
+  assert.equal(session.status, 303);
+  const member = { Cookie: session.headers.get('set-cookie').split(';')[0] };
+  const panel = await (await call('/treinar', member)).text();
+  assert.match(panel, /Clínica atribuída/);
+  assert.doesNotMatch(panel, /Clínica secreta|Nova Clínica|Contas e acessos|Copiar Link/);
+  const csrf = panel.match(/name="_csrf" value="([^"]+)"/)[1];
+  assert.equal((await call('/treinar?clinica=' + other, member)).status, 404);
+  assert.equal((await call('/treinar?aba=conexao', member)).status, 403);
+  assert.doesNotMatch(await (await call('/treinar?aba=conexao&aba=conexao', member)).text(), /Copiar Link/);
+  assert.equal((await call('/treinar?clinica=' + assigned, member, { _csrf: csrf })).status, 403);
+  assert.equal((await call('/contas', member)).status, 403);
+  assert.equal((await call('/operacao', member)).status, 403);
+  assert.equal((await call('/feedback?clinica=' + other, member, { _csrf: csrf, conteudo: 'Outro' })).status, 404);
+  assert.equal((await call('/feedback?clinica=' + assigned, member, { _csrf: csrf, conteudo: 'Da própria clínica' })).status, 303);
+  assert.equal((await call('/contas/revogar', owner, { _csrf: ownerCsrf, conta: id })).status, 303);
+  assert.equal((await call('/treinar', member)).status, 303);
 });

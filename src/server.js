@@ -11,6 +11,7 @@ import { createCrms } from './crm.js';
 import { createWorker } from './worker.js';
 import { webhooks } from './webhooks.js';
 import { admin } from './admin.js';
+import { createAccounts } from './accounts.js';
 import { createSessions } from './admin-auth.js';
 import { createFeedback } from './feedback.js';
 import { createDocuments } from './documents.js';
@@ -22,6 +23,7 @@ export function createApp(config, store, clinics, services = {}) {
     res.set('X-Content-Type-Options', 'nosniff');
     next();
   });
+  app.get('/', (req, res) => res.redirect(303, '/admin/treinar'));
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
   app.use('/webhook', webhooks(config, store, clinics));
   app.use('/admin', admin(config, clinics, store, services));
@@ -45,7 +47,8 @@ export async function start() {
     const { rows: [schema] } = await pool.query(
       "SELECT to_regclass('sdr.jobs') AS jobs, to_regclass('sdr.history') AS history," +
       " to_regclass('sdr.paused') AS paused, to_regclass('sdr.clinicas') AS clinicas, to_regclass('sdr.clinic_files') AS files," +
-      " to_regclass('sdr.admin_sessions') AS sessions, to_regclass('sdr.clinic_feedback') AS feedback," +
+      " to_regclass('sdr.admin_sessions') AS sessions, to_regclass('sdr.clinic_feedback') AS feedback, " +
+      " to_regclass('sdr.admin_accounts') AS accounts," +
       " (SELECT count(*) = 3 FROM information_schema.columns WHERE table_schema = 'sdr'" +
       " AND table_name IN ('jobs','paused','history') AND column_name = 'clinica_id') AS tenant_columns," +
       " EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sdr'" +
@@ -54,7 +57,7 @@ export async function start() {
       " AND table_name = 'clinicas' AND column_name = 'ativo') AS active_column"
     );
     if (!Object.values(schema).every(Boolean)) {
-      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql e supabase/admin-saas.sql no SQL Editor antes de iniciar.');
+      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql, supabase/painel-clinicas.sql, supabase/admin-saas.sql e supabase/contas-admin.sql no SQL Editor antes de iniciar.');
     }
     clinics = createClinics(pool, config, fileURLToPath(new URL('../knowledge/', import.meta.url)));
   } catch (error) {
@@ -66,12 +69,13 @@ export async function start() {
   const documents = createDocuments(pool);
   const feedback = createFeedback(pool);
   const sessions = createSessions(pool);
+  const accounts = createAccounts(pool);
   const decide = createAgent(config.openai);
   const worker = createWorker({
     store, documents, feedback, decide,
     integrationFor: clinics.integration, crmFor: createCrms
   });
-  const server = createApp(config, store, clinics, { documents, feedback, sessions, decide }).listen(config.port, config.host, () => {
+  const server = createApp(config, store, clinics, { accounts, documents, feedback, sessions, decide }).listen(config.port, config.host, () => {
     worker.start();
     console.log('Agente SDR escutando na porta ' + config.port);
   });

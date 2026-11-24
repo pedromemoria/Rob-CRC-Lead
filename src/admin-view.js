@@ -21,7 +21,7 @@ export function adminUrl(clinicId, tab, path = 'treinar') {
 const names = { kommo: 'Kommo', ghl: 'GoHighLevel' };
 const initials = name => name.trim().split(/\s+/).slice(0, 2).map(word => [...word][0]).join('').toUpperCase();
 
-export function layout({ clinics, current, active, csrf, content, operations = false }) {
+export function layout({ clinics, current, active, csrf, content, title: pageTitle, operations = false, member = false }) {
   const items = clinics.map(row => {
     const href = adminUrl(row.id, operations ? undefined : active, operations ? 'operacao' : 'treinar');
     return '<a class="clinic" data-clinic href="' + escape(href) + '"' + (row.id === current?.id ? ' aria-current="page"' : '') +
@@ -32,18 +32,19 @@ export function layout({ clinics, current, active, csrf, content, operations = f
   }).join('');
   const side = '<aside class="sidebar"><a class="brand" href="/admin/treinar"><span class="mark" aria-hidden="true">+</span>' +
     '<span>Robô CRC<small>Painel administrativo</small></span></a>' +
-    '<div class="side-tools"><a class="new" href="/admin/treinar">+ Nova Clínica</a>' +
+    '<div class="side-tools">' + (member ? '' : '<a class="new" href="/admin/treinar">+ Nova Clínica</a>') +
     '<label class="sr-only" for="clinica-busca">Buscar clínica</label>' +
     '<input id="clinica-busca" type="search" placeholder="Buscar clínica…" autocomplete="off"></div>' +
     '<nav class="clinic-list" aria-label="Clínicas">' + (items || '<p>Nenhuma clínica cadastrada.</p>') +
     '<p data-no-match role="status" hidden>Nenhuma clínica encontrada.</p></nav>' +
-    '<div class="side-footer"><a class="side-link" href="' + escape(adminUrl(current?.id, undefined, operations ? 'treinar' : 'operacao')) + '">' +
+    '<div class="side-footer">' + (member ? '' : '<a class="side-link" href="/admin/contas">Contas e acessos</a>' +
+    '<a class="side-link" href="' + escape(adminUrl(current?.id, undefined, operations ? 'treinar' : 'operacao')) + '">' +
     (operations ? 'Voltar à configuração' : 'Operação da fila') +
-    '</a><form action="/admin/sair" method="post">' + hidden('_csrf', csrf) +
+    '</a>') + '<form action="/admin/sair" method="post">' + hidden('_csrf', csrf) +
     '<button class="logout" type="submit">Sair</button></form></div></aside>';
-  const title = operations ? 'Operação da fila' : current?.nome_clinica ?? 'Nova clínica';
+  const title = pageTitle ?? (operations ? 'Operação da fila' : current?.nome_clinica ?? (member ? 'Minha clínica' : 'Nova clínica'));
   const navigation = !operations && current ? '<nav class="tabs" aria-label="Seções da clínica">' +
-    Object.entries(tabs).map(([value, label]) =>
+    Object.entries(tabs).filter(([value]) => !member || value !== 'conexao').map(([value, label]) =>
       '<a href="' + escape(adminUrl(current.id, value)) + '"' + (value === active ? ' aria-current="page"' : '') +
       '>' + escape(label) + '</a>'
     ).join('') + '</nav>' : '';
@@ -178,14 +179,63 @@ export function feedbackView({ clinic, attempted, csrf, corrections }) {
     (items ? '<ul class="file-list">' + items + '</ul>' : '<p class="muted">Nenhum feedback cadastrado.</p>') + '</section>';
 }
 
-export function loginPage(message = '') {
+
+function accountPage(title, content) {
   return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' +
-    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Entrar · Robô CRC</title>' +
-    '<link rel="stylesheet" href="/admin/assets/panel.css"></head><body class="login-page">' +
-    '<main class="login-main"><div class="login-identity"><span class="mark" aria-hidden="true">+</span>Robô CRC</div>' +
-    '<form class="card login-card" action="/admin/login" method="post"><header><h1>Entrar no painel</h1>' +
-    '<p class="muted">Gerencie as clínicas e seus atendimentos.</p></header>' + notice(message, true) +
-    input({}, 'email', 'E-mail', 'email', ' autocomplete="username" maxlength="254" required') +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>' + escape(title) + ' · Robô CRC</title>' +
+    '<link rel="stylesheet" href="/admin/assets/panel.css"><script defer src="/admin/assets/panel.js"></script></head>' +
+    '<body class="login-page"><main class="login-main">' +
+    '<div class="login-identity"><span class="mark" aria-hidden="true">+</span>Robô CRC</div>' +
+    '<section class="card login-card"><h1>' + escape(title) + '</h1>' + content + '</section></main></body></html>';
+}
+
+const emailField = input({}, 'email', 'E-mail', 'email', ' autocomplete="username" maxlength="254" required');
+export function loginPage(message = '', success = '') {
+  return accountPage('Entrar no painel',
+    '<p class="muted">Gerencie as clínicas e seus atendimentos.</p>' + notice(message, true) + notice(success) +
+    '<form action="/admin/login" method="post">' + emailField +
     input({}, 'senha', 'Senha', 'password', ' autocomplete="current-password" maxlength="1024" required') +
-    '<button type="submit">Entrar</button></form></main></body></html>';
+    '<button type="submit">Entrar</button></form><p><a href="/admin/cadastrar">Criar conta</a></p>');
+}
+
+export function signupPage(message = '', requested = false) {
+  return accountPage('Criar conta',
+    (requested ? notice('Solicitação recebida. O administrador enviará ao seu e-mail o link para definir a senha e ativar o acesso.') :
+      '<p class="muted">Informe seu e-mail para solicitar acesso a uma clínica.</p>' + notice(message, true) +
+      '<form action="/admin/cadastrar" method="post">' + emailField + '<button>Solicitar acesso</button></form>') +
+    '<p><a href="/admin/login">Voltar ao login</a></p>');
+}
+
+export function activationPage(message = '', token) {
+  return accountPage('Ativar conta',
+    '<p class="muted">Defina a senha da sua conta. Use de 16 a 256 caracteres.</p>' + notice(message, true) +
+    '<form action="/admin/ativar" method="post" data-activation>' + hidden('convite', typeof token === 'string' && /^[a-f0-9]{64}$/.test(token) ? token : '') +
+    input({}, 'senha', 'Senha', 'password', ' autocomplete="new-password" minlength="16" maxlength="256" required') +
+    '<button>Ativar conta</button></form><p><a href="/admin/login">Voltar ao login</a></p>');
+}
+
+export function accountsView({ accounts, clinics, csrf, invitation }) {
+  const options = clinics.map(clinic => '<option value="' + escape(clinic.id) + '">' +
+    escape(clinic.nome_clinica) + '</option>').join('');
+  const rows = accounts.map(account => {
+    const clinic = clinics.find(row => row.id === account.clinica_id);
+    return '<li class="feedback-row"><div><strong>' + escape(account.email) + '</strong><small class="status">' +
+      escape(account.active ? 'Ativa' : account.invited ? 'Convite pendente' : 'Aguardando aprovação') +
+      (clinic ? ' · ' + escape(clinic.nome_clinica) : '') + '</small></div>' +
+      (account.active || !clinics.length ? '' : '<form method="post" action="/admin/contas/convidar">' +
+        hidden('_csrf', csrf) + hidden('conta', account.id) +
+        '<label for="clinica-' + escape(account.id) + '">Clínica</label><select id="clinica-' +
+        escape(account.id) + '" name="clinica" required>' + options + '</select><button>' + (account.invited ? 'Gerar novo link' : 'Gerar link de ativação') + '</button></form>') +
+      '<form method="post" action="/admin/contas/revogar" data-confirm="Revogar o acesso desta conta?">' +
+      hidden('_csrf', csrf) + hidden('conta', account.id) + '<button class="danger">' +
+      (account.active ? 'Revogar acesso' : 'Remover solicitação') + '</button></form></li>';
+  }).join('');
+  return (invitation ? '<section class="card webhook">' +
+    heading('Link de ativação', 'Envie este link em particular para o e-mail indicado. Ele expira em 48 horas e funciona uma vez.') +
+    '<label for="activation-link">' + escape(invitation.email) + '</label><div class="copy-row">' +
+    '<input id="activation-link" readonly value="' + escape(invitation.path) + '">' +
+    '<button class="secondary" type="button" data-copy-invitation>Copiar link</button></div>' +
+    '<span class="status" data-invitation-status role="status"></span></section>' : '') +
+    '<section class="card">' + heading('Solicitações e contas', 'Escolha uma clínica para liberar o acesso ao treinamento, aos arquivos e ao simulador.') +
+    (rows ? '<ul class="file-list">' + rows + '</ul>' : '<p class="muted">Nenhuma solicitação recebida.</p>') + '</section>';
 }

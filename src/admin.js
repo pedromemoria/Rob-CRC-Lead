@@ -4,21 +4,22 @@ import multer from 'multer';
 import { equalSecret } from './webhooks.js';
 import { ClinicError, clinicKnowledge, trainingFields, uuid } from './clinics.js';
 import { DocumentError, extractDocument, uploadBytes } from './documents.js';
-import { adminAuth } from './admin-auth.js';
+import { normalizedEmail, validEmail } from './accounts.js';
+import { adminAuth, loginLimit } from './admin-auth.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
-import { adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, tabs, tester, training } from './admin-view.js';
+import { accountsView, activationPage, signupPage, adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, tabs, tester, training } from './admin-view.js';
 
-export function admin(config, clinics, store, { documents, feedback, sessions, decide }) {
+export function admin(config, clinics, store, { accounts, documents, feedback, sessions, decide }) {
   const router = express.Router();
-  const auth = adminAuth(config, sessions);
+  const auth = adminAuth(config, sessions, accounts);
   router.use((req, res, next) => {
     res.set({
       'Cache-Control': 'no-store',
       'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       'Referrer-Policy': 'no-referrer'
     });
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.get('Sec-Fetch-Site') === 'cross-site') {
+    if (req.method !== 'GET' && req.method !== 'HEAD' && ['cross-site', 'same-site'].includes(req.get('Sec-Fetch-Site'))) {
       return res.sendStatus(403);
     }
     next();
@@ -31,18 +32,78 @@ export function admin(config, clinics, store, { documents, feedback, sessions, d
   } }).single('arquivo');
   let extractions = 0;
 
+  const authForm = express.urlencoded({ extended: false, limit: '8kb', parameterLimit: 4, inflate: false });
+  const signupLimit = loginLimit(24);
+  let activations = 0;
   router.get('/login', auth.page);
-  router.post('/login', express.urlencoded({ extended: false, limit: '4kb', parameterLimit: 4, inflate: false }), auth.login);
+  router.post('/login', authForm, auth.login);
+  router.get('/cadastrar', (req, res) => res.type('html').send(signupPage('', req.query.enviado === '1')));
+  router.post('/cadastrar', authForm, async (req, res) => {
+    const retry = signupLimit.retry();
+    if (retry) return res.status(429).set('Retry-After', String(retry)).type('html')
+      .send(signupPage('Muitas solicitações. Tente novamente em instantes.'));
+    signupLimit.fail();
+    const email = normalizedEmail(req.body?.email);
+    if (!validEmail(email)) return res.status(422).type('html').send(signupPage('Digite um e-mail válido.'));
+    if (email !== auth.ownerEmail) await accounts.request(email);
+    res.redirect(303, '/admin/cadastrar?enviado=1');
+  });
+  router.get('/ativar', (req, res) => res.type('html').send(activationPage()));
+  router.post('/ativar', authForm, async (req, res) => {
+    if (activations >= 4) return res.status(429).type('html').send(activationPage('Tente novamente em instantes.'));
+    activations++;
+    try {
+      if (!await accounts.activate(req.body?.convite, req.body?.senha)) {
+        return res.status(422).type('html').send(activationPage('Abra o link de ativação válido e use uma senha de pelo menos 16 caracteres.', req.body?.convite));
+      }
+      res.redirect(303, '/admin/login?ativo=1');
+    } finally {
+      activations--;
+    }
+  });
+
   router.use(auth.protect);
+  const memberRoutes = new Set(['/treinar', '/arquivos', '/arquivos/excluir', '/feedback', '/feedback/excluir', '/simular', '/sair']);
+  router.use((req, res, next) => {
+    if (res.locals.memberClinic && !memberRoutes.has(req.path)) return res.sendStatus(403);
+    next();
+  });
   router.post('/sair', form, protect, auth.logout);
+
+  async function renderAccounts(res, invitation) {
+    const [rows, list] = await Promise.all([clinics.list(), accounts.list()]);
+    res.type('html').send(layout({
+      clinics: rows, title: 'Contas e acessos', csrf: res.locals.csrf,
+      content: accountsView({ clinics: rows, accounts: list, csrf: res.locals.csrf, invitation })
+    }));
+  }
+
+  router.get('/contas', (req, res) => renderAccounts(res));
+  router.post('/contas/convidar', form, protect, async (req, res) => {
+    const { conta, clinica } = req.body ?? {};
+    if (typeof conta !== 'string' || !uuid.test(conta) || !await clinics.get(clinica)) return res.sendStatus(404);
+    const account = (await accounts.list()).find(row => row.id === conta);
+    if (!account) return res.sendStatus(404);
+    const token = await accounts.invite(conta, clinica);
+    if (!token) return res.sendStatus(409);
+    await renderAccounts(res, { email: account.email, path: '/admin/ativar#' + token });
+  });
+  router.post('/contas/revogar', form, protect, async (req, res) => {
+    const id = req.body?.conta;
+    if (typeof id !== 'string' || !uuid.test(id) || !await accounts.revoke(id)) return res.sendStatus(404);
+    res.redirect(303, '/admin/contas');
+  });
 
   function protect(req, res, next) {
     if (!equalSecret(req.get('X-CSRF-Token') ?? req.body?._csrf, res.locals.csrf)) return res.sendStatus(403);
     next();
   }
   async function selected(req, res, next) {
-    if (req.query.clinica === undefined) return next();
-    const clinic = await clinics.get(req.query.clinica);
+    const member = res.locals.memberClinic;
+    const id = req.query.clinica ?? member;
+    if (member && id !== member) return res.sendStatus(404);
+    if (id == null) return next();
+    const clinic = await clinics.get(id);
     if (!clinic) return res.sendStatus(404);
     res.locals.clinic = clinic;
     next();
@@ -54,8 +115,10 @@ export function admin(config, clinics, store, { documents, feedback, sessions, d
 
   async function renderPanel(req, res, { message = '', status = 200, attempted, tab = req.query.aba } = {}) {
     const clinic = res.locals.clinic;
-    const active = clinic && Object.hasOwn(tabs, tab) ? tab : 'conexao';
-    const rows = await clinics.list();
+    const member = Boolean(res.locals.memberClinic);
+    if (member && tab === 'conexao') return res.sendStatus(403);
+    const active = clinic && typeof tab === 'string' && Object.hasOwn(tabs, tab) ? tab : member ? 'treinamento' : 'conexao';
+    const rows = member ? [clinic] : await clinics.list();
     const csrf = res.locals.csrf;
     let body;
     if (['arquivos', 'treinamento', 'feedback'].includes(active)) {
@@ -72,7 +135,7 @@ export function admin(config, clinics, store, { documents, feedback, sessions, d
     } else if (active === 'teste') body = tester(clinic, csrf);
     else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
     res.status(status).type('html').send(layout({
-      clinics: rows, current: clinic, active, csrf, content: notice(message, status >= 400) + body
+      clinics: rows, current: clinic, active, csrf, member, content: notice(message, status >= 400) + body
     }));
   }
 
@@ -86,6 +149,7 @@ export function admin(config, clinics, store, { documents, feedback, sessions, d
   router.post('/treinar', form, protect, selected, async (req, res) => {
     const clinic = res.locals.clinic;
     const trainingOnly = clinic && req.query.aba === 'treinamento';
+    if (res.locals.memberClinic && !trainingOnly) return res.sendStatus(403);
     if (req.query.aba && !['conexao', 'treinamento'].includes(req.query.aba)) return res.sendStatus(400);
     const fields = trainingOnly
       ? { ...clinic, versao: req.body.versao,

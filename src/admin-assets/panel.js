@@ -146,3 +146,26 @@ if (clinicSearch) {
     noMatch.hidden = !query || clinics.some(clinic => !clinic.hidden);
   });
 }
+
+const activation = document.querySelector('[data-activation]');
+if (activation) {
+  if (location.hash) {
+    activation.elements.convite.value = location.hash.slice(1);
+    history.replaceState(null, '', location.pathname);
+  }
+}
+
+const invitation = document.querySelector('#activation-link');
+if (invitation) {
+  invitation.value = new URL(invitation.value, location.origin).href;
+  document.querySelector('[data-copy-invitation]').addEventListener('click', async () => {
+    const status = document.querySelector('[data-invitation-status]');
+    try {
+      await navigator.clipboard.writeText(invitation.value);
+      status.textContent = 'Link copiado.';
+    } catch {
+      invitation.select();
+      status.textContent = 'Link selecionado. Copie pelo navegador.';
+    }
+  });
+}

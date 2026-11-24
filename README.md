@@ -4,6 +4,8 @@ Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 2
 
 ## Atualizar o Supabase
 
+Aplique [supabase/contas-admin.sql](supabase/contas-admin.sql) depois das migrações abaixo para habilitar o cadastro individual.
+
 - **Banco multi-clínica já instalado** — Execute [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql) em **SQL Editor → New query → Run**.
 - **Painel com biblioteca já instalado** — Execute [supabase/admin-saas.sql](supabase/admin-saas.sql) antes do deploy. O script adiciona sessões, feedbacks e status de atendimento.
 - **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql), [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql).
@@ -31,6 +33,12 @@ Os tokens CRM são criptografados com AES-256-GCM. Por padrão, a chave é deriv
 O Render Free pode hibernar após 15 minutos sem tráfego. O primeiro webhook após a hibernação pode ultrapassar o prazo de resposta do CRM. A fila volta a processar os eventos já gravados quando o serviço acorda.
 
 [Conexão PostgreSQL do Supabase](https://supabase.com/docs/guides/database/connecting-to-postgres) · [Limites do Render Free](https://render.com/docs/free)
+
+## Cadastrar pessoas
+
+O administrador principal pode usar seu e-mail com `ADMIN_EMAIL` e `ADMIN_PASSWORD` no Render. Outras pessoas abrem **Criar conta** e solicitam acesso com seu próprio e-mail. Em **Contas e acessos**, o administrador seleciona uma clínica para cada pessoa e gera um link de uso único que expira em 48 horas. Envie o link manualmente para o endereço cadastrado. Ao abri-lo, a pessoa define sua própria senha e passa a entrar com seu e-mail.
+
+Uma conta de equipe pode editar o treinamento, os feedbacks e os arquivos da clínica atribuída e usar seu simulador. O administrador mantém as conexões dos CRMs, a fila e a gestão de acessos. **Revogar acesso** encerra as sessões da conta.
 
 ## Cadastrar clínicas
 
