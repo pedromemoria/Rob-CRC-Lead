@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { canSelectClinicFact, clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
-import { consultativeDecision, consultativeFallback, firstName, mentionsPrice, normalize, validSalesReply } from './sales.js';
+import { consultativeDecision, consultativeFallback, firstName, mentionsPrice, modelHistory, nonRepeatingDecision, normalize, validSalesReply } from './sales.js';
 import { safeReply } from './knowledge.js';
 
 export const replies = {
@@ -39,6 +39,7 @@ const prompt = [
   'Você é um SDR no WhatsApp. Seu único objetivo é conduzir o lead à agenda.',
   'Quando precisar avançar a conversa e não estiver respondendo a uma dúvida específica, selecione spin_proximo. Evite repetir a última pergunta.',
   'Use SPIN Selling com empatia. Entenda a situação, valide o principal incômodo, pergunte pelo impacto na rotina sem alarmismo e mostre como uma avaliação pode ajudar a esclarecer os próximos passos. Faça no máximo uma pergunta e valide a situação antes dela. Use mensagens curtas de WhatsApp.',
+  'No fechamento, o aplicativo coleta o turno e os dados de contato que faltarem, uma pergunta por vez. Nunca solicite nome, número ou e-mail em outras etapas.',
   'Respeite a decisão de pensar ou conversar com a família. Nunca crie escassez, prazos, vagas, pré-reservas, tratamentos ou benefícios garantidos. Se houver intenção clara de agendar, deixe o fluxo conduzir a preferência entre manhã e tarde para a equipe verificar no ERP.',
   'O aplicativo trata pedidos de preço e objeções. Nunca selecione preços em respostas gerais. O preço pode ser informado apenas a partir dos Dados da Clínica, após contexto ou insistência, com informação sobre o que está incluso quando cadastrada.',
   'Escolha exatamente uma ferramenta. Jamais escreva mensagens livres, links, datas ou dados para o CRM.',
@@ -93,13 +94,18 @@ export function allowBooking(text, evidence, bookingOffered) {
   if ((bookingOffered || asksAboutBooking(quote)) &&
       /\b(?:manda|mande|envia|envie|passa|passe|enviar|mandar|passar|quero)\b.{0,45}\b(?:link|agenda)\b/.test(quote)) return true;
   if (!bookingOffered) return false;
-  return /^(?:sim|quero|claro|pode|bora|vamos|combinado|fechado|ok|topo|aceito|pode ser|por favor|serve)[.!? ]*$/.test(lead) ||
+  return /^(?:sim|faz sim|sim faz|quero(?: sim)?|claro|pode(?: ser| sim)?|bora|vamos|combinado|fechado|ok|topo|aceito|por favor|serve)[.!? ]*$/.test(lead) ||
     /^(?:(?:sim|combinado|pode ser|fechado)[,! ]+)?(?:as )?\d{1,2}(?::\d{2}|h(?:\d{2})?)?(?: (?:esta bom|funciona|serve))?[.! ]*$/.test(lead) ||
     /^(?:amanha|hoje|segunda|terca|quarta|quinta|sexta|sabado|domingo)(?:.{0,32})(?:funciona|serve|pode ser)[.! ]*$/.test(lead);
 }
 
 export function bookingInterest(text, history) {
-  return allowBooking(text, text, Boolean(history.at(-1)?.offered));
+  const last = history.at(-1);
+  const evaluationOffer = answer => typeof answer === 'string' &&
+    /\b(?:(?:faz sentido|quer|gostaria de|vamos) (?:agendar|marcar|fazer (?:uma )?avaliacao)|faz sentido conversar.{0,55}em uma avaliacao)\b[^?]*\?/.test(normalize(answer));
+  const recovering = /^entendo[.! ]+se quiser conversar mais sobre a avaliacao, fico a disposicao[.! ]*$/u
+    .test(normalize(last?.outbound ?? ''));
+  return allowBooking(text, text, Boolean(last?.offered || evaluationOffer(last?.outbound) || recovering));
 }
 
 export function eligibleSalesReply(text) {
@@ -109,14 +115,14 @@ export function eligibleSalesReply(text) {
 export function createAgent(config, client = new OpenAI({
   apiKey: config.apiKey, timeout: 20000, maxRetries: 0
 })) {
-  return async function decide(event, history, knowledge) {
+  async function decide(event, history, knowledge) {
     const lead = normalize(event.text);
     const reason = explicitHandoff(lead);
     if (reason || !lead) return { kind: 'transbordo_humano', reason: reason || 'midia' };
     if (wantsAssessment(lead)) return { kind: 'responder', text: replies.avaliacao, offer: true };
-    const consultation = consultativeDecision(event.text, history, knowledge, bookingInterest(event.text, history));
+    const consultation = consultativeDecision(event.text, history, knowledge, bookingInterest(event.text, history), event);
     if (consultation) return consultation;
-    const fallback = consultativeFallback(history, firstName(event.leadName));
+    const fallback = consultativeFallback(history, firstName(event.leadName), event.text);
     if (!history.length && /^(?:oi|ola|bom dia|boa tarde|boa noite)[.! ]*$/u.test(lead)) return fallback;
     const { files, replies: approved, clinicData } = knowledge;
     const facts = clinicFacts(clinicData);
@@ -134,7 +140,7 @@ export function createAgent(config, client = new OpenAI({
           feedbacks_da_clinica: knowledge.feedback ?? [],
           documentos_de_referencia: knowledge.references ?? [],
           respostas_disponiveis: Object.fromEntries(options),
-          historico: history.map(turn => ({ lead: turn.inbound, sdr: turn.outbound })),
+          historico: modelHistory(history),
           mensagem_atual: event.text
         }) }
       ],
@@ -172,5 +178,6 @@ export function createAgent(config, client = new OpenAI({
     const text = selected;
     return { kind: 'responder', text,
       offer: offersBooking(text) || [replies.convidar, replies.avaliacao, replies.sem_informacao].includes(text) };
-  };
+  }
+  return async (event, history, knowledge) => nonRepeatingDecision(await decide(event, history, knowledge), history);
 }

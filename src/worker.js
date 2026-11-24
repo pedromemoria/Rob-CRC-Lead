@@ -2,7 +2,7 @@ import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
 import { bookingHandoffReply, handoffReasons, mentionsOnlineBooking } from './agent.js';
-import { mentionsPrice, qualifiedTurnContext, validSalesReply } from './sales.js';
+import { closingContext, mentionsPrice, validSalesReply } from './sales.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
 function errorStatus(error) {
@@ -54,7 +54,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     }
     if (job.step === 'handoff') {
       const booking = job.plan.kind === 'qualificar_agendamento';
-      let reason = handoffReasons[booking ? 'agendamento' : job.plan.reason] + qualifiedTurnContext(job.plan.turn);
+      let reason = handoffReasons[booking ? 'agendamento' : job.plan.reason] + closingContext(job.plan);
       if (job.plan.faltaOportunidade) reason += ' ' + handoffReasons.oportunidade;
       await store.startEffect(job);
       await crm.handoff(job.event, reason, job.id.slice(0, 16));

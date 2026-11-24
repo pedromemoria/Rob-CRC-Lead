@@ -36,27 +36,150 @@ export function mentionsPrice(text) {
   return typeof text === 'string' && /(?:R\$|[$€£]\s*\d|\b\d[\d., ]*\s*(?:reais|euros|dolares)\b|\b(?:valor|preco|custa)\b[^.?!]{0,55}\d|\b(?:consulta|avaliacao|procedimento) (?:e )?(?:gratuit[oa]|sem custo))/i.test(normalize(text));
 }
 
-const turnOffer = text => [salesReplies.turno, salesReplies.tempo].includes(text);
-const offer = text => [salesReplies.turno, salesReplies.tempo, salesReplies.necessidade].includes(text);
+const closingPrompts = {
+  objetivo: [
+    'Claro, posso ajudar a agendar. Qual especialidade ou objetivo você tem em mente?',
+    'Tudo bem. Que tipo de consulta você procura?'
+  ],
+  turno: [
+    salesReplies.turno,
+    'Claro. Para eu encaminhar o pedido, qual turno funciona melhor para você, manhã ou tarde?'
+  ],
+  nome: [
+    'Entendi sua preferência de turno. Qual é seu nome completo para a equipe localizar o cadastro?',
+    'Entendi. Pode me informar seu nome e sobrenome para encaminhar o pedido?'
+  ],
+  telefone: [
+    'Obrigado. Qual telefone ou WhatsApp com DDD a equipe pode usar para confirmar?',
+    'Tudo bem. Qual é o melhor número para retorno, incluindo o DDD?'
+  ]
+};
+
+const turnOffer = text => [...closingPrompts.turno, salesReplies.tempo].includes(text);
+const offer = text => turnOffer(text) || text === salesReplies.necessidade;
 const response = (text, booking = false) => ({ kind: 'responder', text, offer: booking || offer(text) });
 
-export function consultativeDecision(text, history, knowledge, booking) {
+function askClosing(step, last) {
+  const [first, alternate] = closingPrompts[step];
+  return response(sameReply(last, first) ? alternate : first);
+}
+
+function latestAnswer(history, prompts, parse) {
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (!prompts.includes(history[index].outbound)) continue;
+    const value = parse(history[index + 1]?.inbound ?? '');
+    if (value) return value;
+  }
+}
+
+export function fullName(value) {
+  if (typeof value !== 'string') return undefined;
+  const name = value.trim().replace(/^(?:meu nome (?:é|e|eh)|me chamo|(?:nome completo|nome)\s*:)\s*/iu, '')
+    .replace(/[.!]$/u, '').replace(/\s+/g, ' ');
+  if (name.length < 5 || name.length > 80 || !/^[\p{L}\p{M}'’-]+(?: [\p{L}\p{M}'’-]+){1,6}$/u.test(name) ||
+      /\b(?:nao|quero|prefiro|pode|isso|vou|por favor|manha|tarde|tenho|preciso|depois|nome|telefone|whatsapp|horario|obrigad[oa])\b/.test(normalize(name))) return undefined;
+  return name;
+}
+
+export function contactPhone(value) {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.trim().replace(/^(?:(?:meu )?(?:telefone|whatsapp|celular|número|numero)(?:\s+(?:é|e|eh))?\s*:?\s*)/iu, '');
+  if (!/^\+?[0-9() -]{10,25}$/u.test(cleaned)) return undefined;
+  const digits = cleaned.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 15) return undefined;
+  return (cleaned.startsWith('+') ? '+' : '') + digits;
+}
+
+function turnChoice(text) {
+  const lead = normalize(text);
+  const chosen = /\b(?:prefiro|melhor|pode ser)\b.{0,20}?\b(manha|tarde)\b/.exec(lead)?.[1];
+  if (/\b(?:talvez|so se|depende|nao quero)\b/.test(lead) || (!chosen && /\bnao\b/.test(lead))) return undefined;
+  return turns.get(chosen) ?? preferredTurn(lead);
+}
+
+const specialties = [
+  ['urologia', /\burolog\w*\b/],
+  ['odontologia', /\b(?:dent\w*|odont\w*)\b/],
+  ['cardiologia', /\bcardiolog\w*\b/],
+  ['dermatologia', /\bdermatolog\w*\b/],
+  ['ginecologia', /\bginecolog\w*\b/],
+  ['pediatria', /\bpediatr\w*\b/],
+  ['ortopedia', /\bortoped\w*\b/],
+  ['oftalmologia', /\boftalmolog\w*\b/],
+  ['fisioterapia', /\bfisioterap\w*\b/]
+];
+const mentionsGoal = text => /\b(?:especialidade|urolog\w*|dent\w*|cardiolog\w*|dermatolog\w*|ginecolog\w*|pediatr\w*|ortoped\w*|oftalmolog\w*|psicolog\w*|nutri\w*|fisioterap\w*|exame|retorno|check[- ]?up|cirurgia|tratamento|limpeza|dor|incomodo|sintoma)\b/.test(normalize(text));
+
+const sameReply = (first, second) => normalize(first ?? '').replace(/[^\p{L}\d]+/gu, ' ').trim() ===
+  normalize(second ?? '').replace(/[^\p{L}\d]+/gu, ' ').trim();
+
+export function nonRepeatingDecision(decision, history) {
+  if (decision.kind !== 'responder' || !sameReply(decision.text, history.at(-1)?.outbound)) return decision;
+  for (const [step, prompts] of Object.entries(closingPrompts)) {
+    if (prompts.includes(decision.text)) {
+      return response(prompts.find(prompt => !sameReply(prompt, decision.text)), step === 'turno');
+    }
+  }
+  const progress = consultativeFallback(history);
+  if (!sameReply(progress.text, decision.text)) return progress;
+  return response('Tudo bem. Posso ajudar com uma dúvida sobre a consulta ou encaminhar um pedido de agendamento.');
+}
+
+export function modelHistory(history) {
+  return history.map((turn, index) => {
+    const previous = history[index - 1]?.outbound;
+    const closingContact = closingPrompts.nome.includes(previous) || closingPrompts.telefone.includes(previous);
+    return { lead: closingContact ? '[dado de contato para agendamento]' : turn.inbound, sdr: turn.outbound };
+  });
+}
+
+export function closingContext(plan) {
+  const turn = turns.get(normalize(plan.turn ?? ''));
+  const name = fullName(plan.contactName);
+  const phone = contactPhone(plan.contactPhone);
+  return (turn ? ' Turno de preferência informado pelo lead: ' + turn + '.' : '') +
+    (name ? ' Nome completo: ' + name + '.' : '') +
+    (phone ? ' Telefone ou WhatsApp: ' + phone + '.' : '');
+}
+
+export function consultativeDecision(text, history, knowledge, booking, event = {}) {
   const lead = normalize(text);
   const last = history.at(-1);
-  if (noPressure.test(lead)) return response(salesReplies.pensar);
-  const chosenTurn = /\b(?:prefiro|melhor|pode ser)\b.{0,20}\b(manha|tarde)\b/.exec(lead)?.[1];
-  const turn = turns.get(chosenTurn) ?? preferredTurn(lead);
-  const priorTurnOffer = turnOffer(last?.outbound);
-  const acceptsTurn = /^(?:(?:prefiro|melhor|pode ser|de preferencia|quero) )?(?:(?:no periodo )?(?:de|a|da|pela) )?(?:manha|tarde)[.! ]*$/.test(lead) ||
-    /\b(?:prefiro|para mim|melhor|consigo|so posso)\b.{0,32}\b(?:manha|tarde)\b/.test(lead);
-  if (turn && (booking || (priorTurnOffer && acceptsTurn)) && !/\b(?:talvez|so se|depende|nao quero)\b/.test(lead) &&
-      (!/\bnao\b/.test(lead) || Boolean(chosenTurn))) {
-    return { kind: 'qualificar_agendamento', turn };
+  const previous = last?.outbound;
+  if (noPressure.test(lead) || /\b(?:(?:nao quero|nao preciso) (?:mais|agendar|marcar|fazer|de uma avaliacao)|nao tenho interesse|desisti|melhor nao)\b/.test(lead)) {
+    return response(salesReplies.pensar);
   }
-  if (booking || /\b(?:preciso (?:de |fazer )?(?:uma )?avaliacao|faz sentido (?:uma |fazer uma )?avaliacao|quero (?:uma )?consulta)\b/.test(lead) &&
-      !/\b(?:nao|talvez|depois)\b/.test(lead)) {
-    return response(salesReplies.turno);
+
+  const awaitingName = closingPrompts.nome.includes(previous);
+  const awaitingPhone = closingPrompts.telefone.includes(previous);
+  if (awaitingName || awaitingPhone || (turnChoice(text) && (booking || turnOffer(previous)))) {
+    const turn = awaitingName || awaitingPhone
+      ? latestAnswer(history, [...closingPrompts.turno, salesReplies.tempo], turnChoice) ??
+        history.slice(-6).map(step => turnChoice(step.inbound ?? '')).filter(Boolean).at(-1)
+      : turnChoice(text);
+    const name = (awaitingName ? fullName(text) : undefined) ??
+      latestAnswer(history, closingPrompts.nome, fullName) ?? fullName(event.contactName);
+    const phone = (awaitingPhone ? contactPhone(text) : undefined) ?? contactPhone(event.contactPhone);
+    const giveUp = /\b(?:prefiro nao|nao quero (?:informar|passar)|uso este numero|e este numero|o mesmo numero)\b/.test(lead);
+    if (!name && !awaitingPhone && !giveUp && previous !== closingPrompts.nome[1]) {
+      return askClosing('nome', previous);
+    }
+    if (!phone && !giveUp && previous !== closingPrompts.telefone[1]) return askClosing('telefone', previous);
+    return { kind: 'qualificar_agendamento', turn, contactName: name, contactPhone: phone };
   }
+
+  const evaluation = /\b(?:preciso (?:de |fazer )?(?:uma )?avaliacao|faz sentido (?:uma |fazer uma )?avaliacao|quero (?:uma )?consulta)\b/.test(lead) &&
+    !/\b(?:nao|talvez|depois)\b/.test(lead);
+  const awaitingGoal = closingPrompts.objetivo.includes(previous);
+  if (awaitingGoal && !priceQuestion.test(lead)) {
+    return askClosing('turno', previous);
+  }
+  if (booking || evaluation) {
+    const generic = /^(?:eu )?(?:quero|gostaria de|preciso|posso|como faco para|tem como) (?:agendar|marcar)[.!? ]*$/.test(lead);
+    if (generic && !last?.offered && !history.some(step => mentionsGoal(step.inbound ?? ''))) return askClosing('objetivo', previous);
+    return askClosing('turno', previous);
+  }
+
   if (priceQuestion.test(lead)) {
     const discussed = history.some(step => step.outbound === salesReplies.necessidade ||
       step.outbound === salesReplies.impacto || step.outbound === salesReplies.preco_contexto);
@@ -71,21 +194,27 @@ export function consultativeDecision(text, history, knowledge, booking) {
   return null;
 }
 
-export function consultativeFallback(history, lead) {
+export function consultativeFallback(history, lead, message = '') {
+  const topics = [message, ...history.slice(-4).reverse().map(turn => turn.inbound ?? '')];
+  const specialty = topics.flatMap(topic => specialties.filter(([, pattern]) => pattern.test(normalize(topic))))[0]?.[0];
+  const problem = specialty
+    ? 'Entendi que você busca atendimento em ' + specialty + '. O que mais te motivou a procurar essa consulta?'
+    : salesReplies.problema;
+  const goal = Boolean(specialty) || topics.some(mentionsGoal);
+  if (!history.length && goal) return response(problem);
   if (!history.length) return response(lead
     ? 'Oi, ' + lead + '! Que bom falar com você. Como posso ajudar?'
     : 'Oi! Como posso ajudar?');
-  const phases = [salesReplies.situacao, salesReplies.problema, salesReplies.impacto, salesReplies.necessidade];
-  const furthest = history.reduce((phase, turn) => Math.max(phase, phases.indexOf(turn.outbound)), -1);
-  return response(phases[furthest + 1] ??
+  const phases = [salesReplies.situacao, problem, salesReplies.impacto, salesReplies.necessidade];
+  const furthest = history.reduce((phase, turn) => {
+    const index = turn.outbound?.startsWith('Entendi que você busca atendimento em ') ? 1 : phases.indexOf(turn.outbound);
+    return Math.max(phase, index);
+  }, -1);
+  return response(phases[goal && furthest < 0 ? 1 : furthest + 1] ??
     'Entendo. Se quiser conversar mais sobre a avaliação, fico à disposição.');
 }
 
 export function firstName(value) {
   const word = typeof value === 'string' ? value.trim().split(/\s+/u)[0] : '';
   return /^[\p{Script=Latin}][\p{Script=Latin}\p{Mark}'’-]{1,29}$/u.test(word) ? word : undefined;
-}
-
-export function qualifiedTurnContext(turn) {
-  return ['manhã', 'tarde'].includes(turn) ? ' Turno de preferência informado pelo lead: ' + turn + '.' : '';
 }

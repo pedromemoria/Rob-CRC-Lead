@@ -83,17 +83,20 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   const decide = createAgent({ model: 'gpt-4o' }, mock);
   result = modelResult('responder', { resposta_id: 'https://malicioso.invalid' });
   assert.match((await decide({ text: 'Oi', leadName: 'Ana Pereira' }, [], knowledge)).text, /Oi, Ana!/);
-  assert.equal((await decide({ text: 'Eu quero agendar' }, [], knowledge)).text, salesReplies.turno);
+  assert.match((await decide({ text: 'Eu quero agendar' }, [], knowledge)).text, /especialidade ou objetivo/);
   assert.equal((await decide({ text: 'Eu não quero agendar' }, [], knowledge)).kind, 'responder');
   assert.equal((await decide({ text: 'Sim' }, [], knowledge)).kind, 'responder');
   assert.equal((await decide({ text: 'Sim' }, [{ offered: true }], knowledge)).text, salesReplies.turno);
   const offered = [{ outbound: salesReplies.turno, offered: true }];
-  assert.deepEqual(await decide({ text: 'Prefiro à tarde' }, offered, knowledge),
-    { kind: 'qualificar_agendamento', turn: 'tarde' });
+  assert.deepEqual(await decide({
+    text: 'Prefiro à tarde', contactName: 'Ana Pereira', contactPhone: '85999887766'
+  }, offered, knowledge), {
+    kind: 'qualificar_agendamento', turn: 'tarde', contactName: 'Ana Pereira', contactPhone: '85999887766'
+  });
   assert.equal((await decide({ text: 'Pode diagnosticar o meu caso?' }, [], knowledge)).text, replies.avaliacao);
   assert.equal((await decide({ text: 'Quero falar com um humano' }, [], knowledge)).kind, 'transbordo_humano');
   assert.equal((await decide({ text: 'Pare de me enviar mensagens' }, [], knowledge)).reason, 'descadastro');
-  assert.equal(requests, 2);
+  assert.equal(requests, 1);
 
   clinic.faq = '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n';
   knowledge = clinicKnowledge(clinic);
@@ -464,8 +467,7 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.deepEqual(noAI.sources, ['atendimento.txt']);
   assert.equal(noAI.feedbackCount, 1);
   const appointment = await (await simulation(first, false, 'Eu quero agendar de manhã')).json();
-  assert.equal(appointment.reply, bookingHandoffReply);
-  assert.match(appointment.action, /^Encaminhar para agendamento no ERP · /);
+  assert.match(appointment.reply, /nome completo/);
   assert.equal((await simulation(first, true)).status, 200);
   assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
@@ -533,13 +535,12 @@ test('credenciais personalizadas substituem o fallback e sessões vencidas são 
   const pricing = await (await quick('Clínica de teste', 'Quanto custa a consulta?')).json();
   assert.equal(pricing.reply, salesReplies.preco_contexto);
   assert.equal(pricing.offered, false);
-  const turn = await (await quick('Clínica de teste', 'Quero agendar')).json();
+  const turn = await (await quick('Clínica de teste', 'Quero agendar uma consulta de urologia')).json();
   assert.equal(turn.reply, salesReplies.turno);
   const appointment = await (await quick('Clínica de teste', 'À tarde', [{
-    inbound: 'Quero agendar', outbound: turn.reply, offered: turn.offered
+    inbound: 'Quero agendar uma consulta de urologia', outbound: turn.reply, offered: turn.offered
   }])).json();
-  assert.equal(appointment.reply, bookingHandoffReply);
-  assert.match(appointment.action, /^Encaminhar para agendamento no ERP · /);
+  assert.match(appointment.reply, /nome completo/);
   assert.deepEqual(appointment.sources, []);
   await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
   assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
@@ -745,7 +746,7 @@ test('clínica criada só com nome pode ser treinada e simulada antes de conecta
   assert.match((await sim('Tem estacionamento?', true)).reply, /Estacionamento gratuito/);
   assert.equal(modelContext.dados_da_clinica.observacoes, notes);
   assert.equal(modelContext.base_de_conhecimento['regras_negocio.md'], 'Acolha com cuidado.');
-  assert.equal((await sim('Quero agendar de manhã')).reply, bookingHandoffReply);
+  assert.match((await sim('Quero agendar de manhã')).reply, /nome completo/);
   const connectionUrl = view + '&aba=conexao';
   const connection = await (await fetch(base + connectionUrl, { headers })).text();
   assert.doesNotMatch(connection, /name="agendamento_url"|nome e agenda|link de agendamento/i);
@@ -811,7 +812,7 @@ test('retentativa de agendamento mantém a tarefa única e nunca envia o link an
 
   await store.enqueue([{ ...event('erp-sem-card', id, 'erp'), leadId: '101' }]);
   const withAmbiguity = createWorker({
-    store, integrationFor: clinics.integration, decide: async () => ({ kind: 'qualificar_agendamento', turn: 'manhã' }),
+    store, integrationFor: clinics.integration, decide: async () => ({ kind: 'qualificar_agendamento', turn: 'manhã', contactName: 'Ana Pereira', contactPhone: '85999887766' }),
     crmFor: () => ({ ghl: {
       qualify: async () => { throw new OpportunityError(); },
       handoff: async (input, reason) => actions.push(reason),
@@ -819,7 +820,7 @@ test('retentativa de agendamento mantém a tarefa única e nunca envia o link an
     } })
   });
   await withAmbiguity.tick();
-  assert.match(actions[1], /agendamento no ERP.*manhã.*Confira o card/);
+  assert.match(actions[1], /agendamento no ERP.*manhã.*Ana Pereira.*85999887766.*Confira o card/);
   assert.deepEqual(await store.pending(id), []);
 });
 
@@ -839,10 +840,56 @@ test('simulador conduz as etapas do SPIN e respeita objeções antes do encaminh
   assert.equal((await send('Isso tem me incomodado.')).reply, salesReplies.impacto);
   assert.equal((await send('Tem atrapalhado minha rotina.')).reply, salesReplies.necessidade);
   assert.equal((await send('Vou pensar e conversar com minha esposa.')).reply, salesReplies.pensar);
-  assert.equal((await send('Quero agendar.')).reply, salesReplies.turno);
-  assert.equal((await send('Não posso de manhã, prefiro à tarde.')).action, 'Encaminhar para agendamento no ERP · tarde');
+  assert.match((await send('Quero agendar.')).reply, /especialidade ou objetivo/);
+  assert.equal((await send('Urologia')).reply, salesReplies.turno);
+  assert.match((await send('Não posso de manhã, prefiro à tarde.')).reply, /nome completo/);
+  assert.match((await send('Ana Pereira')).reply, /telefone ou WhatsApp/);
+  assert.equal((await send('85999887766')).action, 'Encaminhar para agendamento no ERP · tarde');
 
   const withObjection = await simulate({ text: 'Não tenho tempo agora', history: [], withAI: false, knowledge });
   assert.equal(withObjection.reply, salesReplies.tempo);
   assert.doesNotMatch(withObjection.reply, /minutos|disponibilidade|pré-reserv/i);
+});
+
+test('aceites curtos retomam o fechamento, pedem dados um por vez e não repetem respostas', async () => {
+  const approved = 'A recepção funciona aos sábados.';
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'fechamento')), references: [] };
+  knowledge.replies.set('horario', approved);
+  const mock = { chat: { completions: { async create() {
+    return modelResult('responder', { resposta_id: 'horario' });
+  } } } };
+  const decide = createAgent({ model: 'gpt-4o' }, mock);
+  const invited = { inbound: 'Isso afeta minha rotina', outbound: salesReplies.necessidade, offered: true };
+  const previousLoop = { inbound: 'Pode ser', outbound: 'Entendo. Se quiser conversar mais sobre a avaliação, fico à disposição.', offered: false };
+
+  for (const withAI of [false, true]) {
+    for (const text of ['faz sim', 'quero', 'pode ser', 'por favor']) {
+      const answer = await simulate({ text, history: [invited, previousLoop], withAI, knowledge, decide });
+      assert.equal(answer.reply, salesReplies.turno);
+    }
+
+    const history = [invited];
+    const add = async text => {
+      const answer = await simulate({ text, history, withAI, knowledge, decide });
+      assert.notEqual(answer.reply, history.at(-1).outbound);
+      history.push({ inbound: text, outbound: answer.reply, offered: answer.offered });
+      return answer;
+    };
+    assert.equal((await add('faz sim')).reply, salesReplies.turno);
+    assert.match((await add('Sim')).reply, /manhã ou tarde/);
+    assert.match((await add('À tarde')).reply, /nome completo/);
+    assert.match((await add('Ana')).reply, /nome e sobrenome/);
+    assert.match((await add('Ana Pereira')).reply, /telefone ou WhatsApp/);
+    assert.match((await add('123')).reply, /melhor número/);
+    assert.equal((await add('(85) 99988-7766')).action, 'Encaminhar para agendamento no ERP · tarde');
+
+    const sameFact = await simulate({ text: 'Que horário aos sábados?', history: [
+      { inbound: 'Que horário aos sábados?', outbound: approved, offered: false }
+    ], withAI, knowledge, decide });
+    assert.notEqual(sameFact.reply, approved);
+  }
+  const noAcceptance = await decide({ text: 'faz sim' }, [{ ...invited, outbound: 'A recepção fica aberta até as seis.', offered: false }], knowledge);
+  assert.notEqual(noAcceptance.text, salesReplies.turno);
+  const noBookingGoal = await simulate({ text: 'Eu procuro atendimento em urologia', history: [], withAI: false, knowledge });
+  assert.match(noBookingGoal.reply, /busca atendimento em urologia/);
 });

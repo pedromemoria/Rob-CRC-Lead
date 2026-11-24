@@ -1,6 +1,6 @@
 import { normalize, explicitHandoff, wantsAssessment, bookingInterest, eligibleSalesReply, handoffReasons, bookingHandoffReply, replies } from './agent.js';
 import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
-import { consultativeDecision, consultativeFallback } from './sales.js';
+import { consultativeDecision, consultativeFallback, nonRepeatingDecision } from './sales.js';
 import { terms } from './documents.js';
 
 const words = text => terms(normalize(text));
@@ -25,7 +25,7 @@ function offline(text, history, knowledge) {
   if (knowledge.clinicName && /\b(?:quanto custa|precos?|valores?|endereco|horarios?|convenios?|telefone)\b/.test(normalized)) {
     return { kind: 'responder', text: replies.sem_informacao, offer: true };
   }
-  return consultativeFallback(history);
+  return consultativeFallback(history, undefined, text);
 }
 
 export function validHistory(history) {
@@ -37,9 +37,13 @@ export function validHistory(history) {
 }
 
 export async function simulate({ text, history, withAI, knowledge, decide }) {
-  const result = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
-  const reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply
+  const decision = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
+  const result = nonRepeatingDecision(decision, history);
+  let reply = result.kind === 'qualificar_agendamento' ? bookingHandoffReply
     : result.kind === 'transbordo_humano' ? 'Vou encaminhar sua conversa para a equipe.' : result.text;
+  if (result.kind !== 'responder' && reply === history.at(-1)?.outbound) {
+    reply = 'Seu pedido será encaminhado à equipe da clínica.';
+  }
   const action = result.kind === 'qualificar_agendamento' ? 'Encaminhar para agendamento no ERP' + (result.turn ? ' · ' + result.turn : '')
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
   return {
