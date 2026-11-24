@@ -8,7 +8,7 @@ import { minimumPasswordLength, normalizedEmail, validEmail } from './accounts.j
 import { adminAuth, loginLimit } from './admin-auth.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
-import { accountsView, activationPage, signupPage, adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, tabs, tester, training } from './admin-view.js';
+import { accountsView, activationPage, signupPage, adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
 
 export function admin(config, clinics, store, { accounts, documents, feedback, sessions, decide }) {
   const router = express.Router();
@@ -117,7 +117,8 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     const clinic = res.locals.clinic;
     const member = Boolean(res.locals.memberClinic);
     if (member && tab === 'conexao') return res.sendStatus(403);
-    const active = clinic && typeof tab === 'string' && Object.hasOwn(tabs, tab) ? tab : member ? 'treinamento' : 'conexao';
+    const availableTab = typeof tab === 'string' && Object.hasOwn(tabs, tab) && (clinic || tab === 'teste');
+    const active = availableTab ? tab : member ? 'treinamento' : 'conexao';
     const rows = member ? [clinic] : await clinics.list();
     const csrf = res.locals.csrf;
     let body;
@@ -132,8 +133,9 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
       const lead = active === 'treinamento' ? training({ clinic, attempted, csrf }) :
         active === 'feedback' ? feedbackView({ clinic, attempted, csrf, corrections }) : '';
       body = lead + library({ clinic, csrf, docs, selected: selectedFile, tab: active });
-    } else if (active === 'teste') body = tester(clinic, csrf);
-    else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
+    } else if (active === 'teste') {
+      body = (member ? '' : simulationClinicPicker(rows, clinic)) + (clinic ? tester(clinic, csrf) : '');
+    } else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
     res.status(status).type('html').send(layout({
       clinics: rows, current: clinic, active, csrf, member, content: notice(message, status >= 400) + body
     }));

@@ -147,3 +147,11 @@ button.danger:hover { background: #fce8e4; }
 @media (max-width: 850px) {
   .side-footer .side-link + .side-link { margin: 0; }
 }
+
+
+.simulator-link { margin: 0; font-weight: 650; }
+.simulator-link[aria-current] { background: #284e43; box-shadow: inset 3px 0 #aee5c6; }
+.simulation-picker .copy-row select { flex: 1; }
+@media (max-width: 850px) {
+  .side-tools #clinica-busca { grid-column: 1 / -1; }
+}

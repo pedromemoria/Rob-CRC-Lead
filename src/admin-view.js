@@ -34,6 +34,8 @@ export function layout({ clinics, current, active, csrf, content, title: pageTit
   const side = '<aside class="sidebar"><a class="brand" href="/admin/treinar"><span class="mark" aria-hidden="true">+</span>' +
     '<span>Robô CRC<small>Painel administrativo</small></span></a>' +
     '<div class="side-tools">' + (member ? '' : '<a class="new" href="/admin/treinar">+ Nova Clínica</a>') +
+    '<a class="side-link simulator-link" href="' + escape(adminUrl(current?.id, 'teste')) + '"' +
+    (active === 'teste' ? ' aria-current="page"' : '') + '>Simular atendimento</a>' +
     '<label class="sr-only" for="clinica-busca">Buscar clínica</label>' +
     '<input id="clinica-busca" type="search" placeholder="Buscar clínica…" autocomplete="off"></div>' +
     '<nav class="clinic-list" aria-label="Clínicas">' + (items || '<p>Nenhuma clínica cadastrada.</p>') +
@@ -43,7 +45,8 @@ export function layout({ clinics, current, active, csrf, content, title: pageTit
     (operations ? 'Voltar à configuração' : 'Operação da fila') +
     '</a>') + '<form action="/admin/sair" method="post">' + hidden('_csrf', csrf) +
     '<button class="logout" type="submit">Sair</button></form></div></aside>';
-  const title = pageTitle ?? (operations ? 'Operação da fila' : current?.nome_clinica ?? (member ? 'Minha clínica' : 'Nova clínica'));
+  const title = pageTitle ?? (operations ? 'Operação da fila' : current?.nome_clinica ??
+    (active === 'teste' ? 'Simular atendimento' : member ? 'Minha clínica' : 'Nova clínica'));
   const navigation = !operations && current ? '<nav class="tabs" aria-label="Seções da clínica">' +
     Object.entries(tabs).filter(([value]) => !member || value !== 'conexao').map(([value, label]) =>
       '<a href="' + escape(adminUrl(current.id, value)) + '"' + (value === active ? ' aria-current="page"' : '') +
@@ -146,6 +149,20 @@ export function library({ clinic, csrf, docs, selected, tab }) {
     (list ? '<ul class="file-list">' + list + '</ul>' : '<p class="muted">Nenhum documento nesta clínica.</p>') + '</section>' +
     (selected ? '<section class="card" id="conteudo-arquivo" tabindex="-1">' + heading(selected.nome, 'Texto extraído') +
       '<pre class="document">' + escape(selected.conteudo) + '</pre></section>' : '');
+}
+
+export function simulationClinicPicker(clinics, current) {
+  if (!clinics.length) {
+    return '<section class="card">' + heading('Cadastre uma clínica para simular', 'O teste usa o treinamento da clínica selecionada.') +
+      '<a class="button" href="/admin/treinar">+ Nova Clínica</a></section>';
+  }
+  const options = clinics.map(clinic => '<option value="' + escape(clinic.id) + '"' +
+    (clinic.id === current?.id ? ' selected' : '') + '>' + escape(clinic.nome_clinica) + '</option>').join('');
+  return '<section class="card"><form class="simulation-picker" method="get" action="/admin/treinar">' +
+    hidden('aba', 'teste') + '<label for="simulador-clinica">Clínica para o teste</label>' +
+    '<div class="copy-row"><select id="simulador-clinica" name="clinica" required>' +
+    '<option value=""' + (current ? '' : ' selected') + ' disabled>Selecione uma clínica</option>' +
+    options + '</select><button>Carregar simulador</button></div></form></section>';
 }
 
 export function tester(clinic, csrf) {

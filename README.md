@@ -85,7 +85,7 @@ O preço acima é apenas um exemplo de formatação. Publique somente dados come
 
 - Na aba **Arquivos (Base de Conhecimento)**, **Treinamento & Prompts** ou **Feedbacks & Aprendizado**, envie PDF, DOCX, TXT ou CSV. Você pode arrastar um arquivo ou selecioná-lo. O painel lista nome e data e permite visualizar o texto extraído ou excluir o documento. São aceitos até 5 MB por arquivo, 160 KB de texto extraído e 30 arquivos por clínica. PDFs escaneados precisam passar por OCR antes do envio.
 - O Supabase guarda o texto extraído por clínica. O agente consulta até quatro trechos relevantes dos documentos junto com o treinamento. Para autorizar uma frase que possa ser enviada ao lead, coloque-a em um bloco de respostas aprovadas no treinamento.
-- Em **Testar Robô**, mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI e verificar a aplicação dos feedbacks. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
+- Em **Simular atendimento** no menu lateral, escolha uma clínica e mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI e verificar a aplicação dos feedbacks. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
 
 ## Operar o agente
 
