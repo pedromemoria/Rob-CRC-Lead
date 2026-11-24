@@ -8,7 +8,7 @@ function errorStatus(error) {
   return Number.isInteger(status) ? status : 0;
 }
 
-export function createWorker({ store, decide, integrationFor, crmFor, logger = console }) {
+export function createWorker({ store, decide, integrationFor, crmFor, documents, logger = console }) {
   let timer;
   let active;
   let nextPrune = 0;
@@ -19,7 +19,10 @@ export function createWorker({ store, decide, integrationFor, crmFor, logger = c
     if (integration.provider !== job.event.provider) throw new ClinicError('O CRM do evento não corresponde à clínica.');
     const crm = crmFor(integration)[job.event.provider];
     if (!job.plan) {
-      const decision = await decide(job.event, await store.history(job), integration.knowledge);
+      const history = await store.history(job);
+      const search = [job.event.text, history.at(-1)?.inbound].filter(Boolean).join(' ');
+      const references = documents ? await documents.context(job.clinica_id, search) : [];
+      const decision = await decide(job.event, history, { ...integration.knowledge, references });
       if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
       else if (decision.kind === 'qualificar_agendamento') await store.plan(job, decision, 'qualify');
       else {

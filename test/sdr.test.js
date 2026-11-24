@@ -8,6 +8,7 @@ import { EventEmitter, once } from 'node:events';
 import { PGlite } from '@electric-sql/pglite';
 import { safeReply } from '../src/knowledge.js';
 import { clinicKnowledge, createClinics } from '../src/clinics.js';
+import { createDocuments, extractDocument } from '../src/documents.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createStore, leadKey } from '../src/store.js';
@@ -34,6 +35,7 @@ async function database(dataDir) {
   const client = Object.assign(new EventEmitter(), { query: db.query.bind(db), release() {} });
   await db.exec(schema);
   await db.exec(readFileSync(new URL('../supabase/multi-clinica.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
   return {
     query: client.query,
     connect: async () => client,
@@ -100,7 +102,7 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   const otherId = await clinics.save(clinicForm('ghl', 'other'));
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const config = { adminToken, ghl: { publicKey } };
-  const server = createApp(config, store, clinics).listen(0, '127.0.0.1');
+  const server = createApp(config, store, clinics, { documents: createDocuments(db) }).listen(0, '127.0.0.1');
   t.after(() => new Promise(resolve => server.close(resolve)));
   await once(server, 'listening');
   const base = 'http://127.0.0.1:' + server.address().port;
@@ -160,7 +162,7 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   assert.match(newClinic.headers.get('location'), /clinica=/);
 
   const current = await clinics.get(ghlId);
-  const editUrl = adminUrl + '?clinica=' + ghlId;
+  const editUrl = adminUrl + '?clinica=' + ghlId + '&aba=treinamento';
   const content = '# FAQ\n</textarea><script>alert(1)</script>\n';
   const fields = {
     ...clinicForm('ghl', 'malicious-account'), crm_token: '', faq: content,
@@ -175,6 +177,7 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   const encrypted = (await db.query('SELECT crm_token FROM sdr.clinicas WHERE id = $1', [ghlId])).rows[0].crm_token;
   assert.match(encrypted, /^v1\./);
   assert.doesNotMatch(encrypted, /token-secret/);
+  assert.equal(await clinics.webhookPath(await clinics.get(kommoId)), '/webhook/kommo/' + kommoId + '?token=' + webhookToken);
   const route = await clinics.routing(kommoId);
   assert.match(route.webhook_token_hash, /^[a-f0-9]{64}$/);
   assert.notEqual(route.webhook_token_hash, webhookToken);
@@ -189,7 +192,8 @@ function event(eventId, clinicId, account = 'branch', text = 'Quero agendar') {
 }
 
 test('fila usa treinamento, credenciais, links, histórico e pausas de cada clínica', async t => {
-  const { clinics, store } = await fixture(t);
+  const { clinics, store, db } = await fixture(t);
+  const documents = createDocuments(db);
   const faq = name => '<!-- respostas:sdr -->\nresposta | Conhecimento ' + name + '.\n<!-- fim:sdr -->';
   const first = await clinics.save(clinicForm('ghl', 'a', { faq: faq('Alfa') }));
   const secondBooking = 'https://outra.example.com/consulta';
@@ -208,10 +212,13 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
   const decide = async (e, history, training) => {
     assert.equal(training.replies.get('resposta'), e.clinicId === first ? 'Conhecimento Alfa.' : 'Conhecimento Beta.');
     if (e.eventId === '1') assert.deepEqual(history, []);
+    assert.deepEqual(training.references.map(file => file.nome), [e.clinicId === first ? 'alfa.txt' : 'beta.txt']);
     return e.text === 'Humano'
       ? { kind: 'transbordo_humano', reason: 'humano' } : { kind: 'qualificar_agendamento' };
   };
-  const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor });
+  await documents.save(first, await extractDocument({ originalname: 'alfa.txt', buffer: Buffer.from('Documento Alfa') }));
+  await documents.save(second, await extractDocument({ originalname: 'beta.txt', buffer: Buffer.from('Documento Beta') }));
+  const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor, documents });
   const a = event('1', first, 'a');
   const b = event('1', second, 'b');
   await store.enqueue([a, event('2', first, 'a', 'Humano'), event('3', first, 'a'), b]);
@@ -311,4 +318,62 @@ test('a configuração inicia sem variáveis de CRM ou de agendamento', () => {
     ADMIN_TOKEN: adminToken
   } }).toString().trim();
   assert.equal(output, '3000');
+});
+
+test('biblioteca e simulador ficam isolados por clínica e não gravam eventos reais', async t => {
+  const { clinics, db, store } = await fixture(t);
+  const faq = '<!-- respostas:sdr -->\nhorario | Atendemos aos sábados.\n<!-- fim:sdr -->';
+  const first = await clinics.save(clinicForm('ghl', 'first', { faq }));
+  const second = await clinics.save(clinicForm('ghl', 'second'));
+  const docs = createDocuments(db);
+  let modelRefs;
+  const server = createApp({ adminToken, ghl: {} }, store, clinics, {
+    documents: docs, decide: async (event, history, knowledge) => {
+      modelRefs = knowledge.references;
+      return { kind: 'responder', text: replies.convidar, offer: true };
+    }
+  }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const headers = { Authorization: 'Bearer ' + adminToken };
+  const site = id => base + '/admin/treinar?clinica=' + id + '&aba=arquivos';
+  const html = await (await fetch(site(first), { headers })).text();
+  const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
+  const makeUpload = () => {
+    const form = new FormData();
+    form.set('_csrf', csrf);
+    form.set('arquivo', new Blob(['Atendimento aos sábados às 10 horas. <script>']), 'atendimento.txt');
+    return form;
+  };
+  const upload = () => fetch(base + '/admin/arquivos?clinica=' + first,
+    { method: 'POST', headers, body: makeUpload(), redirect: 'manual' });
+  assert.equal((await upload()).status, 303);
+  assert.equal((await upload()).status, 422);
+  const [file] = await docs.list(first);
+  assert.equal((await docs.list(second)).length, 0);
+  const opened = await (await fetch(site(first) + '&arquivo=' + file.id, { headers })).text();
+  assert.match(opened, /Atendimento aos sábados/);
+  assert.doesNotMatch(opened, /<script>/);
+  assert.equal((await fetch(site(second) + '&arquivo=' + file.id, { headers })).status, 404);
+
+  const simulation = (id, withAI, text = 'Qual o horário aos sábados?') => fetch(base + '/admin/simular?clinica=' + id, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ withAI, text })
+  });
+  const noAI = await (await simulation(first, false)).json();
+  assert.equal(noAI.reply, 'Atendemos aos sábados.');
+  assert.deepEqual(noAI.sources, ['atendimento.txt']);
+  const appointment = await (await simulation(first, false, 'Eu quero agendar')).json();
+  assert.match(appointment.reply, /https:\/\/agenda.example.com/);
+  assert.equal((await simulation(first, true)).status, 200);
+  assert.match(modelRefs[0].trecho, /sábados/);
+  assert.deepEqual((await (await simulation(second, false)).json()).sources, []);
+  assert.equal(await store.claim(), null);
+  const remove = id => fetch(base + '/admin/arquivos/excluir?clinica=' + id, {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ _csrf: csrf, arquivo: file.id })
+  });
+  assert.equal((await remove(second)).status, 404);
+  assert.equal((await remove(first)).status, 303);
+  assert.deepEqual(await docs.list(first), []);
 });

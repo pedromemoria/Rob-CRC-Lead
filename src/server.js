@@ -11,8 +11,9 @@ import { createCrms } from './crm.js';
 import { createWorker } from './worker.js';
 import { webhooks } from './webhooks.js';
 import { admin } from './admin.js';
+import { createDocuments } from './documents.js';
 
-export function createApp(config, store, clinics) {
+export function createApp(config, store, clinics, services = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -21,7 +22,7 @@ export function createApp(config, store, clinics) {
   });
   app.get('/health', (req, res) => res.json({ status: 'ok' }));
   app.use('/webhook', webhooks(config, store, clinics));
-  app.use('/admin', admin(config, clinics, store));
+  app.use('/admin', admin(config, clinics, store, services));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) {
@@ -41,12 +42,14 @@ export async function start() {
   try {
     const { rows: [schema] } = await pool.query(
       "SELECT to_regclass('sdr.jobs') AS jobs, to_regclass('sdr.history') AS history," +
-      " to_regclass('sdr.paused') AS paused, to_regclass('sdr.clinicas') AS clinicas," +
+      " to_regclass('sdr.paused') AS paused, to_regclass('sdr.clinicas') AS clinicas, to_regclass('sdr.clinic_files') AS files," +
       " (SELECT count(*) = 3 FROM information_schema.columns WHERE table_schema = 'sdr'" +
-      " AND table_name IN ('jobs','paused','history') AND column_name = 'clinica_id') AS tenant_columns"
+      " AND table_name IN ('jobs','paused','history') AND column_name = 'clinica_id') AS tenant_columns," +
+      " EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'sdr'" +
+      " AND table_name = 'clinicas' AND column_name = 'webhook_token_cifrado') AS webhook_column"
     );
     if (!Object.values(schema).every(Boolean)) {
-      throw new Error('Execute supabase/schema.sql e supabase/multi-clinica.sql no SQL Editor antes de iniciar.');
+      throw new Error('Execute supabase/schema.sql, supabase/multi-clinica.sql e supabase/painel-clinicas.sql no SQL Editor antes de iniciar.');
     }
     clinics = createClinics(pool, config, fileURLToPath(new URL('../knowledge/', import.meta.url)));
   } catch (error) {
@@ -55,11 +58,13 @@ export async function start() {
     throw new Error('Falha ao acessar o PostgreSQL. Confira DATABASE_URL, TLS e o schema (código ' + error.code + ').');
   }
   const store = createStore(pool);
+  const documents = createDocuments(pool);
+  const decide = createAgent(config.openai);
   const worker = createWorker({
-    store, decide: createAgent(config.openai),
+    store, documents, decide,
     integrationFor: clinics.integration, crmFor: createCrms
   });
-  const server = createApp(config, store, clinics).listen(config.port, config.host, () => {
+  const server = createApp(config, store, clinics, { documents, decide }).listen(config.port, config.host, () => {
     worker.start();
     console.log('Agente SDR escutando na porta ' + config.port);
   });

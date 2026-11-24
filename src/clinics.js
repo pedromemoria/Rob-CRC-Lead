@@ -72,7 +72,7 @@ function parseSettings(form, current) {
     if (error instanceof KnowledgeError) throw new ClinicError(error.message);
     throw error;
   }
-  return { clinic, token, webhookHash: secret ? hashWebhook(secret) : null };
+  return { clinic, token, webhookSecret: secret, webhookHash: secret ? hashWebhook(secret) : null };
 }
 
 export function createClinics(database, config, templateDir) {
@@ -116,6 +116,19 @@ export function createClinics(database, config, templateDir) {
       return rows;
     },
     get: id => get(id, columns),
+    async webhookPath(clinic) {
+      const base = '/webhook/' + clinic.crm_tipo + '/' + clinic.id;
+      if (clinic.crm_tipo === 'ghl') return base;
+      const row = await get(clinic.id, 'webhook_token_cifrado');
+      if (!row?.webhook_token_cifrado) return null;
+      try {
+        const secret = decrypt(row.webhook_token_cifrado, clinic.id + ':webhook');
+        return base + '?token=' + encodeURIComponent(secret);
+      } catch (error) {
+        if (error instanceof ClinicError) return null;
+        throw error;
+      }
+    },
     routing: id => get(id, 'id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_hash'),
     async integration(id) {
       const row = await get(id, columns + ',crm_token');
@@ -129,8 +142,9 @@ export function createClinics(database, config, templateDir) {
       return { ...crm, provider: row.crm_tipo, bookingUrl: row.agendamento_url, knowledge: clinicKnowledge(row) };
     },
     async save(form, current = null) {
-      const { clinic, token, webhookHash } = parseSettings(form, current);
+      const { clinic, token, webhookHash, webhookSecret } = parseSettings(form, current);
       const encrypted = token ? encrypt(token, clinic.id) : null;
+      const encryptedWebhook = webhookSecret ? encrypt(webhookSecret, clinic.id + ':webhook') : null;
       const editable = [clinic.nome_clinica, clinic.funil_id, clinic.etapa_agendamento_id,
         clinic.responsavel_id, clinic.agendamento_url, ...trainingFields.map(name => clinic[name])];
       try {
@@ -143,16 +157,16 @@ export function createClinics(database, config, templateDir) {
             'UPDATE sdr.clinicas SET nome_clinica=$1,funil_id=$2,etapa_agendamento_id=$3,responsavel_id=$4,' +
             'agendamento_url=$5,regras_negocio=$6,quebra_objecoes=$7,faq=$8,' +
             'crm_token=COALESCE($9,crm_token),webhook_token_hash=COALESCE($10,webhook_token_hash),versao=versao+1 ' +
-            'WHERE id=$11 AND versao=$12',
-            [...editable, encrypted, webhookHash, clinic.id, current.versao]
+            ' , webhook_token_cifrado=COALESCE($13,webhook_token_cifrado) WHERE id=$11 AND versao=$12',
+            [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook]
           );
           if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
         } else {
           await database.query(
             'INSERT INTO sdr.clinicas(nome_clinica,funil_id,etapa_agendamento_id,responsavel_id,' +
-            'agendamento_url,regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id)' +
-            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
-            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id]
+            'agendamento_url,regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_cifrado)' +
+            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
+            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, encryptedWebhook]
           );
         }
       } catch (error) {

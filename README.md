@@ -4,8 +4,8 @@ Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 2
 
 ## Atualizar o Supabase
 
-- **Banco já instalado** — Abra **SQL Editor → New query**, cole [supabase/multi-clinica.sql](supabase/multi-clinica.sql) e clique em **Run**.
-- **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql).
+- **Banco multi-clínica já instalado** — Execute [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) em **SQL Editor → New query → Run**.
+- **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql) e por fim [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql).
 
 A migração pode ser repetida e preserva os registros anteriores. Eventos, pausas e treinamento do sistema anterior permanecem no banco sem associação automática a uma clínica. Cadastre as clínicas e copie para cada cadastro apenas os textos que pertencem a ela. Os webhooks antigos devem ser atualizados para as novas rotas.
 
@@ -25,7 +25,7 @@ O CRM e o link da agenda são configurados no painel. As variáveis fixas antiga
 
 ### Chave de criptografia dos tokens
 
-Os tokens CRM são criptografados com AES-256-GCM. Por padrão, a chave é derivada de `ADMIN_TOKEN`. Para poder trocar a senha administrativa sem regravar os tokens, defina `CRM_ENCRYPTION_KEY` no Render com 64 caracteres hexadecimais aleatórios **antes de cadastrar as clínicas** e mantenha essa chave estável. Se alterar a chave usada para criptografia, regrave os tokens das clínicas. O segredo do webhook Kommo é armazenado como hash. O painel não mostra os segredos após salvar.
+Os tokens CRM são criptografados com AES-256-GCM. Por padrão, a chave é derivada de `ADMIN_TOKEN`. Para poder trocar a senha administrativa sem regravar os tokens, defina `CRM_ENCRYPTION_KEY` no Render com 64 caracteres hexadecimais aleatórios **antes de cadastrar as clínicas** e mantenha essa chave estável. Se alterar a chave usada para criptografia, regrave os tokens das clínicas. O segredo do webhook Kommo é armazenado como hash para validação e de forma cifrada para permitir copiar o link no painel administrativo. A aba de conexão só exibe o link completo para um administrador autenticado. Se um cadastro antigo só tiver o hash, insira o segredo atual novamente para liberar a cópia.
 
 O Render Free pode hibernar após 15 minutos sem tráfego. O primeiro webhook após a hibernação pode ultrapassar o prazo de resposta do CRM. A fila volta a processar os eventos já gravados quando o serviço acorda.
 
@@ -34,8 +34,8 @@ O Render Free pode hibernar após 15 minutos sem tráfego. O primeiro webhook ap
 ## Cadastrar clínicas
 
 1. Abra `/admin/treinar` no domínio do serviço. Use **admin** como usuário e o valor de `ADMIN_TOKEN` como senha.
-2. Clique em **Nova clínica**. Escolha Kommo ou GoHighLevel, preencha a conta, o token, os IDs de funil, etapa e responsável pelo transbordo, a URL HTTPS de agendamento e os três textos de treinamento.
-3. Salve e copie a rota de webhook exibida. Cada conta CRM pode ser vinculada a uma única clínica. A conta e o provedor ficam fixos após criar o cadastro para evitar redirecionamento de eventos pendentes. As demais configurações e os textos podem ser editados.
+2. Clique em **Nova clínica**. Escolha Kommo ou GoHighLevel, preencha a conta, o token, os IDs de funil, etapa e responsável pelo transbordo e a URL HTTPS de agendamento.
+3. Salve e clique em **Copiar Link** na aba **Conexão & CRM**. Cada conta CRM pode ser vinculada a uma única clínica. A conta e o provedor ficam fixos após criar o cadastro para evitar redirecionamento de eventos pendentes. As demais configurações e os textos podem ser editados.
 4. Configure a URL no CRM e valide um evento por clínica. A fila, o histórico e a operação ficam separados por clínica. O login administrativo é central e gerencia todos os cadastros.
 
 ### Kommo
@@ -70,6 +70,12 @@ valor_consulta | A consulta custa R$ 120,00.
 
 O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada campo de treinamento pode ter até 24 KB. O formulário valida e salva a revisão no banco de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
 
+## Arquivos e simulador
+
+- Na aba **Arquivos (Base de Conhecimento)**, envie PDF, DOCX, TXT ou CSV. Você pode arrastar um arquivo ou selecioná-lo. O painel lista nome e data e permite visualizar o texto extraído ou excluir o documento. São aceitos até 5 MB por arquivo, 160 KB de texto extraído e 30 arquivos por clínica. PDFs escaneados precisam passar por OCR antes do envio.
+- O Supabase guarda o texto extraído por clínica. O agente consulta até quatro trechos relevantes dos documentos junto com o treinamento. Para autorizar uma frase que possa ser enviada ao lead, coloque-a em um bloco de respostas aprovadas no treinamento.
+- Em **Testar Robô**, mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
+
 ## Operar o agente
 
 - **Resposta.** O GPT-4o escolhe entre `responder`, `qualificar_agendamento` e `transbordo_humano`. O servidor só aceita uma ferramenta por mensagem e produz a saída usando frases fixas ou publicadas. Para pedidos de avaliação conhecidos, há também redirecionamento programático para a sessão.
@@ -89,20 +95,25 @@ O preço acima é apenas um exemplo de formatação. Publique somente dados come
 ├── render.yaml
 ├── supabase/
 │   ├── schema.sql
-│   └── multi-clinica.sql
+│   ├── multi-clinica.sql
+│   └── painel-clinicas.sql
 ├── knowledge/
 │   ├── faq.md
 │   ├── quebra_objecoes.md
 │   └── regras_negocio.md
 ├── src/
+│   ├── admin-assets/
+│   ├── admin-view.js
 │   ├── admin.js
 │   ├── agent.js
 │   ├── clinics.js
 │   ├── config.js
 │   ├── crm.js
 │   ├── database.js
+│   ├── documents.js
 │   ├── knowledge.js
 │   ├── server.js
+│   ├── simulator.js
 │   ├── store.js
 │   ├── webhooks.js
 │   └── worker.js
