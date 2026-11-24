@@ -9,7 +9,7 @@ import { adminAuth, loginLimit } from './admin-auth.js';
 import { ClinicDataError, clinicDataFromForm, validateClinicData } from './clinic-data.js';
 import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
-import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
+import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, createClinicView, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
 
 export function admin(config, clinics, store, { accounts, documents, feedback, sessions, decide }) {
   const router = express.Router();
@@ -139,14 +139,15 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     } else if (active === 'teste') {
       const simulationClinic = req.query.modo === 'rapido' ? null : clinic;
       body = tester(simulationClinic, csrf) + (member ? '' : simulationClinicPicker(rows, simulationClinic));
-    } else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
+    } else if (clinic) body = connection({ clinic, attempted, csrf, webhook: await clinics.webhookPath(clinic) });
+    else body = createClinicView({ attempted, csrf });
     res.status(status).type('html').send(layout({
       clinics: rows, current: clinic, active, csrf, member, content: notice(message, status >= 400) + body
     }));
   }
 
   const messages = {
-    clinic: 'Clínica salva.', dados: 'Dados e preços salvos.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
+    clinic: 'Clínica salva.', dados: 'Informações salvas.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
     deleted: 'Arquivo excluído.', feedback: 'Feedback salvo.', feedbackDeleted: 'Feedback excluído.'
   };
   router.get('/treinar', selected, (req, res) => renderPanel(req, res, {
@@ -176,18 +177,29 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     const trainingOnly = clinic && req.query.aba === 'treinamento';
     if (res.locals.memberClinic && !trainingOnly) return res.sendStatus(403);
     if (req.query.aba && !['conexao', 'treinamento'].includes(req.query.aba)) return res.sendStatus(400);
-    const fields = trainingOnly
-      ? { ...clinic, versao: req.body.versao,
-        ...Object.fromEntries(trainingFields.map(name => [name, req.body[name]])) }
-      : { ...req.body, ...Object.fromEntries(trainingFields.map(name => [
+    try {
+      if (trainingOnly) {
+        await clinics.saveTraining(req.body, clinic);
+        return res.redirect(303, adminUrl(clinic.id, 'treinamento') + '&salvo=training');
+      }
+      if (!clinic && !req.body?.crm_tipo) {
+        const id = await clinics.createDraft(req.body?.nome_clinica);
+        return res.redirect(303, adminUrl(id, 'dados') + '&salvo=clinic');
+      }
+      if (clinic && !clinic.crm_tipo && req.body?.configuracao === 'rascunho') {
+        await clinics.saveDraftSettings({ ...req.body, agendamento_url: req.body.agenda_rascunho }, clinic);
+        return res.redirect(303, adminUrl(clinic.id, 'conexao') + '&salvo=clinic');
+      }
+      const fields = { ...req.body, ...Object.fromEntries(trainingFields.map(name => [
         name, req.query.aba === 'conexao' ? (clinic ?? clinics.templates)[name] : req.body[name] ?? (clinic ?? clinics.templates)[name]
       ])) };
-    try {
       const id = await clinics.save(fields, clinic);
-      res.redirect(303, adminUrl(id, trainingOnly ? 'treinamento' : 'conexao') + '&salvo=' + (trainingOnly ? 'training' : 'clinic'));
+      res.redirect(303, adminUrl(id, 'conexao') + '&salvo=clinic');
     } catch (error) {
       if (!(error instanceof ClinicError)) throw error;
-      return renderPanel(req, res, { message: error.message, status: 422, attempted: req.body });
+      const attempted = req.body?.configuracao === 'rascunho'
+        ? { ...req.body, agendamento_url: req.body.agenda_rascunho } : req.body;
+      return renderPanel(req, res, { message: error.message, status: 422, attempted });
     }
   });
 

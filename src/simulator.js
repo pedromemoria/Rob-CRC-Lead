@@ -1,5 +1,5 @@
 import { normalize, explicitHandoff, wantsAssessment, allowBooking, handoffReasons, replies } from './agent.js';
-import { clinicFacts, matchClinicFact } from './clinic-data.js';
+import { clinicFacts, matchClinicFact, matchClinicObservation } from './clinic-data.js';
 import { terms } from './documents.js';
 
 const words = text => terms(normalize(text));
@@ -11,7 +11,9 @@ function offline(text, history, knowledge) {
   if (reason) return { kind: 'transbordo_humano', reason };
   if (wantsAssessment(normalized)) return { kind: 'responder', text: replies.avaliacao, offer: true };
   if (allowBooking(text, text, Boolean(history.at(-1)?.offered))) return { kind: 'qualificar_agendamento' };
-  const fact = matchClinicFact(knowledge.clinicData, clinicFacts(knowledge.clinicData), text, history.at(-1)?.inbound);
+  const facts = clinicFacts(knowledge.clinicData);
+  const fact = matchClinicFact(knowledge.clinicData, facts, text, history.at(-1)?.inbound) ??
+    matchClinicObservation(knowledge.clinicData, facts, text);
   if (fact) return { kind: 'responder', text: fact };
   const query = words(text);
   const ranked = Array.from(knowledge.replies, ([id, answer]) => ({
@@ -34,9 +36,9 @@ export function validHistory(history) {
 
 export async function simulate({ clinic, text, history, withAI, knowledge, decide }) {
   const result = withAI ? await decide({ text }, history, knowledge) : offline(text, history, knowledge);
-  const quick = !clinic;
+  const hasAgenda = Boolean(clinic?.agendamento_url);
   let answer = result.text;
-  if (quick && result.kind === 'responder') {
+  if (!hasAgenda && result.kind === 'responder') {
     if (answer === replies.avaliacao) answer = 'Entendo sua dúvida. A equipe pode avaliar seu caso em uma consulta. Quer simular o agendamento?';
     if (answer === replies.sem_informacao) answer = 'Essa informação ainda não está disponível. Quer simular o agendamento?';
     if (answer === replies.convidar) {
@@ -45,15 +47,15 @@ export async function simulate({ clinic, text, history, withAI, knowledge, decid
     }
   }
   const reply = result.kind === 'qualificar_agendamento'
-    ? (quick ? 'Sua intenção de agendar foi identificada. Neste teste, a clínica ainda não tem um link de agenda.'
+    ? (!hasAgenda ? 'Sua intenção de agendar foi identificada. Neste teste, a clínica ainda não tem um link de agenda.'
       : 'Perfeito! Escolha o melhor horário por aqui:\n' + clinic.agendamento_url)
     : result.kind === 'transbordo_humano'
       ? 'Vou encaminhar sua conversa para a equipe.'
       : answer;
-  const action = result.kind === 'qualificar_agendamento' ? (quick ? 'Agendamento simulado' : 'Mover para agendamento')
+  const action = result.kind === 'qualificar_agendamento' ? (clinic?.crm_tipo ? 'Mover para agendamento' : 'Agendamento simulado')
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
   return {
-    reply, action, offered: Boolean(result.offer && (!quick || answer !== 'Oi! Como posso ajudar?')),
+    reply, action, offered: Boolean(result.offer && answer !== 'Oi! Como posso ajudar?'),
     sources: knowledge.references.map(item => item.nome),
     feedbackCount: knowledge.feedback?.length ?? 0
   };

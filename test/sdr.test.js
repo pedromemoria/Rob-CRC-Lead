@@ -42,6 +42,7 @@ async function database(dataDir) {
   await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/contas-admin.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/dados-clinicas.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../supabase/cadastro-rapido.sql', import.meta.url), 'utf8'));
   return {
     query: client.query,
     connect: async () => client,
@@ -615,7 +616,7 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
   const headers = { Authorization: 'Bearer ' + adminToken };
   const view = id => base + '/treinar?aba=dados&clinica=' + id;
   const html = await (await fetch(view(first), { headers })).text();
-  assert.match(html, /Dados &amp; Preços da Clínica/);
+  assert.match(html, /Informações da Clínica/);
   assert.match(html, /Adicionar serviço/);
   const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
   const version = String((await clinics.get(first)).versao);
@@ -671,4 +672,81 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
   assert.equal((await save({ versao: String((await clinics.get(first)).versao), serv_valor: 'R$ 220' })).status, 303);
   await worker.tick();
   assert.deepEqual(sent, ['Valor de Consulta inicial: R$ 150 a R$ 200', 'Valor de Consulta inicial: R$ 220']);
+});
+
+test('clínica criada só com nome pode ser treinada e simulada antes de conectar o CRM', async t => {
+  const { clinics, db, store } = await fixture(t);
+  let modelContext;
+  const decide = createAgent({ model: 'gpt-4o' }, { chat: { completions: { async create(request) {
+    modelContext = JSON.parse(request.messages[1].content);
+    return modelResult('responder', { resposta_id: 'cadastro_observacao_0' });
+  } } } });
+  const docs = createDocuments(db);
+  const feedback = createFeedback(db);
+  const server = createApp({ adminToken, ghl: {} }, store, clinics, {
+    documents: docs, feedback, sessions: createSessions(db), decide
+  }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const headers = { Authorization: 'Bearer ' + adminToken };
+  const html = await (await fetch(base + '/admin/treinar', { headers })).text();
+  assert.match(html, /Criar clínica/);
+  assert.doesNotMatch(html, /name="crm_token"|name="agendamento_url"/);
+  const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
+  const post = (path, values) => fetch(base + path, {
+    method: 'POST', redirect: 'manual', headers, body: new URLSearchParams({ ...values, _csrf: csrf })
+  });
+  assert.equal((await post('/admin/treinar', { nome_clinica: ' ' })).status, 422);
+  const created = await post('/admin/treinar', { nome_clinica: 'Clínica Rápida' });
+  assert.equal(created.status, 303);
+  assert.match(created.headers.get('location'), /aba=dados/);
+  const draft = (await clinics.list())[0];
+  assert.equal(draft.crm_tipo, null);
+  assert.equal(draft.ativo, false);
+  assert.equal(await clinics.webhookPath(draft), null);
+  const view = '/admin/treinar?clinica=' + draft.id;
+  const version = async () => String((await clinics.get(draft.id)).versao);
+  assert.equal((await post(view + '&aba=treinamento', {
+    versao: await version(), regras_negocio: 'Acolha com cuidado.', quebra_objecoes: '', faq: ''
+  })).status, 303);
+  const notes = 'Estacionamento gratuito na lateral.\nPara ultrassom, chegue com 20 minutos de antecedência.';
+  const dataUrl = '/admin/dados?clinica=' + draft.id;
+  assert.equal((await post(dataUrl, { versao: await version(), observacoes: 'Visite https://example.com' })).status, 422);
+  assert.equal((await post(dataUrl, { versao: await version(), observacoes: notes })).status, 303);
+  const info = await (await fetch(base + view + '&aba=dados', { headers })).text();
+  assert.match(info, /Estacionamento gratuito/);
+  assert.match(info, /Observações gerais da clínica/);
+  const sim = async (text, withAI = false) => (await fetch(base + '/admin/simular?clinica=' + draft.id, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf },
+    body: JSON.stringify({ text, withAI })
+  })).json();
+  assert.equal((await sim('Tem estacionamento?')).reply, 'Orientação da clínica: Estacionamento gratuito na lateral.');
+  assert.match((await sim('Qual o preparo para ultrassom?')).reply, /20 minutos/);
+  assert.match((await sim('Tem estacionamento?', true)).reply, /Estacionamento gratuito/);
+  assert.equal(modelContext.dados_da_clinica.observacoes, notes);
+  assert.equal(modelContext.base_de_conhecimento['regras_negocio.md'], 'Acolha com cuidado.');
+  assert.match((await sim('Quero agendar')).reply, /ainda não tem um link/);
+  const connectionUrl = view + '&aba=conexao';
+  assert.equal((await post(connectionUrl, { versao: await version(), nome_clinica: draft.nome_clinica,
+    configuracao: 'rascunho', agenda_rascunho: bookingUrl })).status, 303);
+  assert.match((await sim('Quero agendar')).reply, /https:\/\/agenda.example.com/);
+  assert.equal((await clinics.get(draft.id)).crm_tipo, null);
+  const fields = clinicForm('kommo', 'draft-account', { nome_clinica: draft.nome_clinica });
+  assert.equal((await post(connectionUrl, { ...fields, versao: await version(), crm_token: '' })).status, 422);
+  assert.equal((await post(connectionUrl, { ...fields, versao: await version() })).status, 303);
+  const connected = await clinics.get(draft.id);
+  assert.equal(connected.crm_tipo, 'kommo');
+  assert.equal(connected.ativo, true);
+  assert.equal(connected.dados_publicos.observacoes, notes);
+  assert.equal(connected.regras_negocio, 'Acolha com cuidado.');
+  assert.match(await clinics.webhookPath(connected), /webhook\/kommo/);
+  assert.equal(await store.claim(), null);
+  const sent = [];
+  const worker = createWorker({ store, documents: docs, feedback, decide, integrationFor: clinics.integration,
+    crmFor: () => ({ kommo: { send: async (event, text) => sent.push(text) } })
+  });
+  await store.enqueue([{ ...event('clinic-observation', draft.id, 'draft-account', 'Tem estacionamento?'), provider: 'kommo' }]);
+  await worker.tick();
+  assert.deepEqual(sent, ['Orientação da clínica: Estacionamento gratuito na lateral.']);
 });

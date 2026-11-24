@@ -4,6 +4,8 @@ Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 2
 
 ## Atualizar o Supabase
 
+Aplique [supabase/cadastro-rapido.sql](supabase/cadastro-rapido.sql) depois das migrações abaixo para criar clínicas só com o nome.
+
 Aplique [supabase/dados-clinicas.sql](supabase/dados-clinicas.sql) após as migrações anteriores para habilitar os dados e preços por clínica.
 
 Aplique [supabase/contas-admin.sql](supabase/contas-admin.sql) depois das migrações abaixo para habilitar o cadastro individual.
@@ -45,8 +47,8 @@ Uma conta de equipe pode editar o treinamento, os feedbacks e os arquivos da cl�
 ## Cadastrar clínicas
 
 1. Abra `/admin/treinar` no domínio do serviço. O painel leva à página de login. Enquanto o par personalizado estiver incompleto ou inválido, use **admin@robocrc.local** e o valor atual de `ADMIN_TOKEN` como senha. Para personalizar, configure os dois campos em **Render → Environment**, com e-mail válido e senha de 8 a 1.024 caracteres. A sessão usa cookie HTTPS com duração de 8 horas. **Sair** encerra a sessão atual.
-2. Clique em **Nova clínica**. Escolha Kommo ou GoHighLevel, preencha a conta, o token, os IDs de funil, etapa e responsável pelo transbordo e a URL HTTPS de agendamento.
-3. Salve e clique em **Copiar Link** na aba **Conexão & CRM**. Cada conta CRM pode ser vinculada a uma única clínica. A conta e o provedor ficam fixos após criar o cadastro para evitar redirecionamento de eventos pendentes. As demais configurações e os textos podem ser editados.
+2. Clique em **+ Nova Clínica**, informe o nome e salve. As abas ficam disponíveis na hora. A clínica aparece como **Em configuração** até conectar um CRM.
+3. Em **Conexão & CRM**, você pode salvar apenas o link HTTPS da agenda para testar. Para ativar o atendimento, escolha Kommo ou GoHighLevel e informe a conta, o token, os IDs de funil, etapa e responsável, além do link da agenda. A conta e o provedor ficam fixos após conectar. Clique em **Copiar Link** para configurar o webhook.
 4. Configure a URL no CRM e valide um evento por clínica. A fila, o histórico e a operação ficam separados por clínica. O login administrativo é central e gerencia todos os cadastros. Use a busca da barra lateral para localizar uma clínica. Em **Conexão & CRM**, o status **Inativa** suspende novos eventos e deixa os já enfileirados aguardando reativação. Um evento já em processamento pode concluir.
 
 ### Kommo
@@ -81,9 +83,9 @@ valor_consulta | A consulta custa R$ 120,00.
 
 O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada campo de treinamento pode ter até 24 KB. O formulário valida e salva a revisão no banco de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
 
-## Dados e preços da clínica
+## Informações da clínica
 
-Em **Dados & Preços da Clínica**, cadastre endereço, referência, horário, telefone, profissionais e serviços. Cada serviço pode ter valor ou faixa, duração, formas de pagamento e convênios. Use **Adicionar** ou **Remover** conforme necessário e clique em **Salvar dados e preços**. O formulário aceita até 20 profissionais e 20 serviços por clínica.
+Em **Informações da Clínica**, cadastre endereço, referência, horário, telefone, profissionais e serviços. Cada serviço pode ter valor ou faixa, duração, formas de pagamento e convênios. Use **Adicionar** ou **Remover** conforme necessário e clique em **Salvar informações**. O formulário aceita até 20 profissionais e 20 serviços por clínica. Em **Observações gerais**, inclua diferenciais, regras e orientações de preparo que podem ser compartilhadas. Use uma orientação por linha, com até 320 caracteres por linha.
 
 O simulador e o atendimento real carregam o cadastro da clínica junto ao treinamento, feedbacks e documentos. Quando a pergunta identifica um dado cadastrado, ele tem prioridade na resposta. O link oficial do Google Maps pode ser aberto no painel. Pelo chat, o robô informa o endereço cadastrado e envia o link de agendamento após o aceite.
 

@@ -1,5 +1,5 @@
 import { minimumPasswordLength } from './accounts.js';
-import { contactFields, professionalFields, serviceFields, maxRows } from './clinic-data.js';
+import { contactFields, professionalFields, serviceFields, maxRows, maxObservations } from './clinic-data.js';
 import { trainingFields } from './clinics.js';
 
 export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -9,7 +9,7 @@ export const escape = value => String(value ?? '').replace(/[&<>"']/g, char => (
 export const hidden = (name, value) => '<input type="hidden" name="' + escape(name) + '" value="' + escape(value) + '">';
 
 export const tabs = {
-  conexao: 'Conexão & CRM', dados: 'Dados & Preços da Clínica', treinamento: 'Treinamento & Prompts',
+  conexao: 'Conexão & CRM', dados: 'Informações da Clínica', treinamento: 'Treinamento & Prompts',
   arquivos: 'Arquivos (Base de Conhecimento)', feedback: 'Feedbacks & Aprendizado', teste: 'Testar Robô'
 };
 
@@ -28,9 +28,9 @@ export function layout({ clinics, current, active, csrf, content, title: pageTit
     const href = adminUrl(row.id, operations ? undefined : active, operations ? 'operacao' : 'treinar');
     return '<a class="clinic" data-clinic href="' + escape(href) + '"' + (row.id === current?.id ? ' aria-current="page"' : '') +
       '><span class="avatar" aria-hidden="true">' + escape(initials(row.nome_clinica)) +
-      '</span><span class="clinic-name">' + escape(row.nome_clinica) + '<small>' + escape(names[row.crm_tipo]) +
+      '</span><span class="clinic-name">' + escape(row.nome_clinica) + '<small>' + escape(names[row.crm_tipo] ?? 'Sem CRM') +
       ' <span class="clinic-status' + (row.ativo ? ' online' : '') + '">' +
-      (row.ativo ? 'Ativa' : 'Inativa') + '</span></small></span></a>';
+      (row.crm_tipo ? (row.ativo ? 'Ativa' : 'Inativa') : 'Em configuração') + '</span></small></span></a>';
   }).join('');
   const side = '<aside class="sidebar"><a class="brand" href="/admin/treinar"><span class="mark" aria-hidden="true">+</span>' +
     '<span>Robô CRC<small>Painel administrativo</small></span></a>' +
@@ -58,7 +58,7 @@ export function layout({ clinics, current, active, csrf, content, title: pageTit
     ' · Robô CRC</title><link rel="stylesheet" href="/admin/assets/panel.css">' +
     '<script defer src="/admin/assets/panel.js"></script></head><body>' + side +
     '<main id="conteudo"><div class="shell"><header class="page-heading"><h1>' + escape(title) + '</h1>' +
-    (current ? '<span class="provider">' + escape(names[current.crm_tipo]) + '</span>' : '') +
+    (current ? '<span class="provider">' + escape(names[current.crm_tipo] ?? 'Sem CRM') + '</span>' : '') +
     '</header>' + navigation + content + '</div></main></body></html>';
 }
 
@@ -74,10 +74,18 @@ const heading = (title, description = '') => '<header class="section-heading"><h
 export const notice = (message, error = false) => message
   ? '<p class="notice' + (error ? ' error' : '') + '" role="' + (error ? 'alert' : 'status') + '">' + escape(message) + '</p>' : '';
 
+export function createClinicView({ attempted, csrf }) {
+  return '<form class="card form-card" method="post" action="/admin/treinar">' +
+    heading('Criar clínica', 'Informe o nome para abrir a pasta da clínica.') + hidden('_csrf', csrf) +
+    input(attempted ?? {}, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"') +
+    '<footer class="form-footer"><button>Criar clínica</button></footer></form>';
+}
+
 export function connection({ clinic, attempted, csrf, webhook }) {
+  const connected = Boolean(clinic.crm_tipo);
   const source = { ...clinic, ...attempted };
   const type = clinic?.crm_tipo ?? (source.crm_tipo === 'ghl' ? 'ghl' : 'kommo');
-  const identity = clinic
+  const identity = connected
     ? '<div class="account"><span>Conta CRM</span><strong>' + escape(clinic.crm_account_id) + '</strong>' +
       (clinic.kommo_conta_id ? '<span>ID numérico ' + escape(clinic.kommo_conta_id) + '</span>' : '') + '</div>'
     : '<div class="fields"><div class="field"><label for="crm_tipo">CRM</label><select id="crm_tipo" name="crm_tipo">' +
@@ -85,36 +93,42 @@ export function connection({ clinic, attempted, csrf, webhook }) {
       '<option value="ghl"' + (type === 'ghl' ? ' selected' : '') + '>GoHighLevel</option></select></div>' +
       input(source, 'crm_account_id', 'Subdomínio ou Location ID', 'text', ' required') +
       '<div data-kommo>' + input(source, 'kommo_conta_id', 'ID numérico da conta Kommo') + '</div></div>';
-  const webhookPanel = clinic ? '<section class="card webhook">' + heading('Webhook da clínica') +
+  const webhookPanel = connected ? '<section class="card webhook">' + heading('Webhook da clínica') +
     (webhook
       ? '<div class="copy-row"><code id="webhook-value" data-webhook="' + escape(webhook) + '">' + escape(webhook) +
         '</code><button class="secondary" type="button" data-copy>Copiar Link</button></div>' +
         '<span id="copy-status" class="status" role="status"></span>'
       : '<p>Salve um segredo para exibir o link completo. Se ainda tiver o segredo atual, insira o mesmo valor para preservar o webhook já configurado.</p>') +
     '</section>' : '';
-  const url = adminUrl(clinic?.id, 'conexao');
-  return webhookPanel + '<form class="card form-card" method="post" action="' + escape(url) + '">' +
-    heading(clinic ? 'Dados da conexão' : 'Cadastrar clínica', clinic ? '' :
-      'Cadastre a conta do CRM e a agenda para liberar as demais abas.') +
-    hidden('_csrf', csrf) + (clinic ? hidden('versao', attempted?.versao ?? clinic.versao) : '') +
-    input(source, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"') + identity +
+  const url = escape(adminUrl(clinic.id, 'conexao'));
+  const version = hidden('versao', attempted?.versao ?? clinic.versao);
+  const name = input(source, 'nome_clinica', 'Nome da clínica', 'text', ' required maxlength="120"');
+  const draftSettings = connected ? '' : '<form class="card form-card" method="post" action="' + url + '">' +
+    heading('Nome e agenda', 'Você pode usar o link de agenda no simulador antes de conectar um CRM.') +
+    hidden('_csrf', csrf) + version + hidden('configuracao', 'rascunho') + name +
+    input({ agenda_rascunho: source.agendamento_url }, 'agenda_rascunho', 'Link de agendamento (opcional)', 'url') +
+    '<footer class="form-footer"><button>Salvar nome e agenda</button></footer></form>';
+  return webhookPanel + draftSettings + '<form class="card form-card" method="post" action="' + url + '">' +
+    heading(connected ? 'Dados da conexão' : 'Conectar CRM', connected ? '' :
+      'Preencha estes campos quando quiser habilitar o atendimento pelo CRM.') +
+    hidden('_csrf', csrf) + version + (connected ? name : hidden('nome_clinica', clinic.nome_clinica)) + identity +
     '<div class="fields">' +
-    input(source, 'crm_token', clinic ? 'Novo token CRM (opcional)' : 'Token CRM', 'password',
-      ' autocomplete="new-password"' + (clinic ? '' : ' required')) +
-    (!clinic || type === 'kommo' ? '<div data-kommo>' + input(source, 'webhook_token',
-      clinic ? 'Segredo do webhook Kommo (opcional)' : 'Segredo do webhook Kommo', 'password',
+    input(source, 'crm_token', connected ? 'Novo token CRM (opcional)' : 'Token CRM', 'password',
+      ' autocomplete="new-password"' + (connected ? '' : ' required')) +
+    (!connected || type === 'kommo' ? '<div data-kommo>' + input(source, 'webhook_token',
+      connected ? 'Segredo do webhook Kommo (opcional)' : 'Segredo do webhook Kommo', 'password',
       ' autocomplete="new-password" minlength="32" maxlength="128"') +
       '<small>Use de 32 a 128 caracteres URL-safe.</small></div>' : '') +
     input(source, 'funil_id', 'ID do funil', 'text', ' required') +
     input(source, 'etapa_agendamento_id', 'ID da etapa de agendamento', 'text', ' required') +
     input(source, 'responsavel_id', 'ID do responsável pelo transbordo', 'text', ' required') +
     input(source, 'agendamento_url', 'URL de agendamento', 'url', ' required') + '</div>' +
-    (clinic ? '<div class="field clinic-toggle"><label for="ativo">Status do atendimento</label>' +
+    (connected ? '<div class="field clinic-toggle"><label for="ativo">Status do atendimento</label>' +
       '<select id="ativo" name="ativo"><option value="sim"' +
       (source.ativo === true || source.ativo === 'sim' ? ' selected' : '') + '>Ativa</option><option value="nao"' +
       (source.ativo === false || source.ativo === 'nao' ? ' selected' : '') +
       '>Inativa</option></select><small>Uma clínica inativa deixa de receber novos eventos para o robô.</small></div>' : '') +
-    '<footer class="form-footer"><button>' + (clinic ? 'Salvar conexão' : 'Cadastrar clínica') + '</button></footer></form>';
+    '<footer class="form-footer"><button>' + (connected ? 'Salvar conexão' : 'Conectar CRM') + '</button></footer></form>';
 }
 
 export function training({ clinic, attempted, csrf }) {
@@ -175,8 +189,13 @@ export function clinicDataView({ clinic, draft, csrf, version }) {
       ? '<p><a target="_blank" rel="noopener noreferrer" href="' +
         escape(clinic.dados_publicos.contato.maps_url) + '">Abrir endereço no Google Maps</a></p>' : '') +
     '</section>' + rows(data.profissionais, 'prof', 'Corpo clínico', 'Profissional', professionalFields) +
-    rows(data.servicos, 'serv', 'Serviços e tabela de preços', 'Serviço', serviceFields) +
-    '<div class="form-footer"><button>Salvar dados e preços</button></div></form>';
+    rows(data.servicos, 'serv', 'Serviços e preços', 'Serviço', serviceFields) +
+    '<section class="card">' + heading('Observações gerais da clínica') +
+    '<label for="observacoes">Diferenciais, preparo de exames e regras da unidade</label>' +
+    '<p class="muted" id="observacoes-ajuda">Escreva as orientações que podem ser compartilhadas com pacientes, uma por linha, com até 320 caracteres por orientação.</p>' +
+    '<textarea id="observacoes" name="observacoes" rows="6" maxlength="' + maxObservations +
+    '" aria-describedby="observacoes-ajuda">' + escape(data.observacoes) + '</textarea></section>' +
+    '<div class="form-footer"><button>Salvar informações</button></div></form>';
 }
 
 export function simulationClinicPicker(clinics, current) {

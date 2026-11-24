@@ -13,6 +13,46 @@ const columns = 'id,nome_clinica,crm_tipo,crm_account_id,kommo_conta_id,funil_id
 
 export class ClinicError extends Error {}
 
+const namePattern = /^[^\u0000-\u001f\u007f]{1,120}$/u;
+
+function clinicName(value) {
+  const name = typeof value === 'string' ? value.trim() : '';
+  if (!namePattern.test(name)) throw new ClinicError('Informe o nome da clínica com até 120 caracteres.');
+  return name;
+}
+
+function bookingUrl(value, required = true) {
+  const booking = typeof value === 'string' ? value.trim() : '';
+  if (!required && !booking) return null;
+  const url = URL.parse(booking);
+  if (booking.length > 2048 || url?.protocol !== 'https:' || url.username || url.password || /[\s\\]/u.test(booking)) {
+    throw new ClinicError('Informe uma URL de agendamento HTTPS sem credenciais.');
+  }
+  return booking;
+}
+
+function checkVersion(version, current) {
+  if (typeof version !== 'string' || !/^[1-9][0-9]{0,9}$/.test(version) || Number(version) !== current.versao) {
+    throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
+  }
+}
+
+function parseTraining(form) {
+  const content = Object.fromEntries(trainingFields.map(name => {
+    if (typeof form[name] !== 'string' || form[name].includes('\0')) {
+      throw new ClinicError('Confira o texto de treinamento ' + name + '.');
+    }
+    return [name, form[name].replace(/\r\n/g, '\n')];
+  }));
+  try {
+    clinicKnowledge(content);
+  } catch (error) {
+    if (error instanceof KnowledgeError) throw new ClinicError(error.message);
+    throw error;
+  }
+  return content;
+}
+
 export function hashWebhook(secret) {
   return createHash('sha256').update(secret).digest('hex');
 }
@@ -33,6 +73,7 @@ function parseSettings(form, current) {
 
   const type = current?.crm_tipo ?? value('crm_tipo', /^(kommo|ghl)$/, 'CRM');
   const isKommo = type === 'kommo';
+  const connected = Boolean(current?.crm_tipo);
   const idPattern = isKommo ? numeric : externalId;
   const account = current?.crm_account_id ?? value('crm_account_id',
     isKommo ? /^[a-z0-9][a-z0-9-]{0,62}$/ : externalId, 'Conta CRM');
@@ -40,45 +81,28 @@ function parseSettings(form, current) {
     ? current?.kommo_conta_id ?? value('kommo_conta_id', numeric, 'ID numérico da conta Kommo')
     : null;
   const secret = isKommo ? value('webhook_token') : '';
-  if (isKommo && (!current || secret) && !webhookSecret.test(secret)) {
+  if (isKommo && (!connected || secret) && !webhookSecret.test(secret)) {
     throw new ClinicError('Use um segredo de webhook Kommo com 32 a 128 caracteres, usando letras, números, hífen ou sublinhado.');
   }
 
   const token = value('crm_token');
-  if ((!current || token) && !/^[\x21-\x7e]{1,8192}$/.test(token)) {
+  if ((!connected || token) && !/^[\x21-\x7e]{1,8192}$/.test(token)) {
     throw new ClinicError('Informe um token CRM válido.');
   }
   const stage = value('etapa_agendamento_id', idPattern, 'Etapa de agendamento');
   if (isKommo && ['142', '143'].includes(stage)) throw new ClinicError('Informe uma etapa aberta no Kommo.');
-  const booking = value('agendamento_url');
-  const url = URL.parse(booking);
-  if (booking.length > 2048 || url?.protocol !== 'https:' || url.username || url.password || /[\s\\]/u.test(booking)) {
-    throw new ClinicError('Informe uma URL de agendamento HTTPS sem credenciais.');
-  }
-
-  const active = form.ativo ?? current?.ativo ?? true;
+  const active = form.ativo ?? (connected ? current.ativo : true);
   if (![true, false, 'sim', 'nao'].includes(active)) throw new ClinicError('Confira o status do atendimento.');
 
   const clinic = {
     id: current?.id ?? randomUUID(),
-    nome_clinica: value('nome_clinica', /^[^\u0000-\u001f\u007f]{1,120}$/u, 'Nome da clínica'),
+    nome_clinica: clinicName(form.nome_clinica),
     crm_tipo: type, crm_account_id: account, kommo_conta_id: kommoAccount,
     funil_id: value('funil_id', idPattern, 'Funil'), etapa_agendamento_id: stage,
-    responsavel_id: value('responsavel_id', idPattern, 'Responsável'), agendamento_url: booking,
+    responsavel_id: value('responsavel_id', idPattern, 'Responsável'), agendamento_url: bookingUrl(form.agendamento_url),
     ativo: active === true || active === 'sim'
   };
-  for (const name of trainingFields) {
-    if (typeof form[name] !== 'string' || form[name].includes('\0')) {
-      throw new ClinicError('Confira o texto de treinamento ' + name + '.');
-    }
-    clinic[name] = form[name].replace(/\r\n/g, '\n');
-  }
-  try {
-    clinicKnowledge(clinic);
-  } catch (error) {
-    if (error instanceof KnowledgeError) throw new ClinicError(error.message);
-    throw error;
-  }
+  Object.assign(clinic, parseTraining(form));
   return { clinic, token, webhookSecret: secret, webhookHash: secret ? hashWebhook(secret) : null };
 }
 
@@ -118,12 +142,38 @@ export function createClinics(database, config, templateDir) {
 
   return {
     templates,
+    async createDraft(name) {
+      const { rows } = await database.query(
+        'INSERT INTO sdr.clinicas(nome_clinica,regras_negocio,quebra_objecoes,faq,ativo)' +
+        ' VALUES($1,$2,$3,$4,false) RETURNING id',
+        [clinicName(name), ...trainingFields.map(field => templates[field])]
+      );
+      return rows[0].id;
+    },
+    async saveDraftSettings(form, current) {
+      checkVersion(form.versao, current);
+      const result = await database.query(
+        'UPDATE sdr.clinicas SET nome_clinica=$1,agendamento_url=$2,versao=versao+1 WHERE id=$3 AND versao=$4 AND crm_tipo IS NULL',
+        [clinicName(form.nome_clinica), bookingUrl(form.agendamento_url, false), current.id, current.versao]
+      );
+      if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
+    },
+    async saveTraining(form, current) {
+      checkVersion(form.versao, current);
+      const content = parseTraining(form);
+      const result = await database.query(
+        'UPDATE sdr.clinicas SET regras_negocio=$1,quebra_objecoes=$2,faq=$3,versao=versao+1 WHERE id=$4 AND versao=$5',
+        [...trainingFields.map(field => content[field]), current.id, current.versao]
+      );
+      if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
+    },
     async list() {
       const { rows } = await database.query('SELECT id,nome_clinica,crm_tipo,ativo FROM sdr.clinicas ORDER BY nome_clinica,id');
       return rows;
     },
     get: id => get(id, columns),
     async webhookPath(clinic) {
+      if (!clinic.crm_tipo) return null;
       const base = '/webhook/' + clinic.crm_tipo + '/' + clinic.id;
       if (clinic.crm_tipo === 'ghl') return base;
       const row = await get(clinic.id, 'webhook_token_cifrado');
@@ -139,7 +189,7 @@ export function createClinics(database, config, templateDir) {
     routing: id => get(id, 'id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_hash,ativo'),
     async integration(id) {
       const row = await get(id, columns + ',crm_token');
-      if (!row) throw new ClinicError('Clínica inexistente.');
+      if (!row?.crm_tipo) throw new ClinicError('A clínica não tem CRM configurado.');
       const raw = decrypt(row.crm_token, id);
       const common = { token: raw, pipelineId: row.funil_id, stageId: row.etapa_agendamento_id, assignee: row.responsavel_id };
       const crm = row.crm_tipo === 'kommo'
@@ -164,16 +214,15 @@ export function createClinics(database, config, templateDir) {
         clinic.responsavel_id, clinic.agendamento_url, ...trainingFields.map(name => clinic[name])];
       try {
         if (current) {
-          if (typeof form.versao !== 'string' || !/^[1-9][0-9]{0,9}$/.test(form.versao) ||
-              Number(form.versao) !== current.versao) {
-            throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
-          }
+          checkVersion(form.versao, current);
           const result = await database.query(
             'UPDATE sdr.clinicas SET nome_clinica=$1,funil_id=$2,etapa_agendamento_id=$3,responsavel_id=$4,' +
             'agendamento_url=$5,regras_negocio=$6,quebra_objecoes=$7,faq=$8,' +
             'crm_token=COALESCE($9,crm_token),webhook_token_hash=COALESCE($10,webhook_token_hash),versao=versao+1 ' +
-            ' , webhook_token_cifrado=COALESCE($13,webhook_token_cifrado),ativo=$14 WHERE id=$11 AND versao=$12',
-            [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook, clinic.ativo]
+            ', webhook_token_cifrado=COALESCE($13,webhook_token_cifrado),ativo=$14,crm_tipo=$15,crm_account_id=$16,' +
+            'kommo_conta_id=$17 WHERE id=$11 AND versao=$12',
+            [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook, clinic.ativo,
+              clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id]
           );
           if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
         } else {

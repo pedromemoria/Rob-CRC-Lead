@@ -1,6 +1,7 @@
 export class ClinicDataError extends Error {}
 
 export const maxRows = 20;
+export const maxObservations = 3000;
 export const contactFields = [
   ['endereco', 'Endereço completo', 190],
   ['referencia', 'Ponto de referência', 120],
@@ -73,7 +74,8 @@ export function clinicDataFromForm(form) {
   return {
     contato: Object.fromEntries(contactFields.map(([key]) => [key, form[key] ?? ''])),
     profissionais: readRows(form, 'prof', professionalFields),
-    servicos: readRows(form, 'serv', serviceFields)
+    servicos: readRows(form, 'serv', serviceFields),
+    observacoes: form.observacoes ?? ''
   };
 }
 
@@ -95,8 +97,10 @@ export function validateClinicData(draft) {
       return row;
     });
   }
+  const observacoes = textField(draft.observacoes, maxObservations, 'Observações gerais')
+    .split(/\r?\n/).map(line => publicField(line, 320, 'Observações gerais')).filter(Boolean).join('\n');
   return {
-    contato, profissionais: rows(draft.profissionais, professionalFields), servicos: rows(draft.servicos, serviceFields)
+    contato, profissionais: rows(draft.profissionais, professionalFields), servicos: rows(draft.servicos, serviceFields), observacoes
   };
 }
 
@@ -128,6 +132,8 @@ export function clinicFacts(data) {
     add('servico_' + index + '_pagamento', 'Formas de pagamento de ' + row.nome, row.pagamento);
     add('servico_' + index + '_convenios', 'Convênios de ' + row.nome, row.convenios);
   });
+  const observations = data?.observacoes?.split('\n') ?? [];
+  observations.forEach((line, index) => add('observacao_' + index, 'Orientação da clínica', line));
   return options;
 }
 
@@ -145,6 +151,7 @@ function named(items, query) {
 const followUp = /^(?:e )?(?:(?:qual (?:e )?(?:o |a )?)?(?:quanto custa|quanto (?:e|tempo(?: dura)?)|preco|valor|duracao|pagamento|convenios?)|(?:aceita )?(?:pix|cartao|convenio))[.!? ]*$/;
 
 export function canSelectClinicFact(data, id, message, previous = '') {
+  if (id.startsWith('cadastro_observacao_')) return canShareClinicObservation(message);
   const service = /^cadastro_servico_(\d+)_/.exec(id);
   if (!service) return true;
   const services = data?.servicos ?? [];
@@ -191,4 +198,30 @@ export function matchClinicFact(data, options, message, previous = '') {
     return options.get('cadastro_profissional_' + index) ?? null;
   }
   return options.get('cadastro_' + topic) ?? null;
+}
+
+
+const observationStopWords = new Set(['aceita', 'clinica', 'como', 'diferencial', 'exame', 'exames',
+  'mais', 'minha', 'para', 'pode', 'posso', 'precisa', 'preciso', 'preparo', 'qual', 'quais', 'quem',
+  'regra', 'regras', 'sobre', 'tenho', 'voces']);
+
+function canShareClinicObservation(message) {
+  const text = normalized(message);
+  return !/\b(?:quanto (?:custa|fica)|precos?|valores?|parcelamento|medicamentos?|remedios?|dosagem)\b/.test(text) &&
+    !/\b(?:estou gravida|sou (?:diabetic[oa]|hipertens[oa])|tenho (?:diabetes|alergia)|posso (?:tomar|suspender|parar))\b/.test(text);
+}
+
+export function matchClinicObservation(data, options, message) {
+  if (!canShareClinicObservation(message)) return null;
+  const words = value => new Set((normalized(value).match(/[a-z0-9]{4,}/g) ?? [])
+    .filter(word => !observationStopWords.has(word)));
+  const query = words(message);
+  if (!query.size) return null;
+  const notes = data?.observacoes?.split('\n') ?? [];
+  const ranked = notes.map((line, index) => ({
+    index, score: [...words(line)].filter(word => query.has(word)).length
+  })).filter(row => row.score > 0).sort((a, b) => b.score - a.score);
+  const [best, next] = ranked;
+  if (!best || (next && next.score === best.score)) return null;
+  return options.get('cadastro_observacao_' + best.index) ?? null;
 }
