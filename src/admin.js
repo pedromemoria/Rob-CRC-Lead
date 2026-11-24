@@ -1,31 +1,23 @@
-import { createHmac } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import { equalSecret } from './webhooks.js';
 import { ClinicError, clinicKnowledge, trainingFields, uuid } from './clinics.js';
 import { DocumentError, extractDocument, uploadBytes } from './documents.js';
+import { adminAuth } from './admin-auth.js';
+import { feedbackBytes } from './feedback.js';
 import { simulate, validHistory } from './simulator.js';
-import { adminUrl, connection, escape, hidden, layout, library, notice, tabs, tester, training } from './admin-view.js';
+import { adminUrl, connection, escape, feedbackView, hidden, layout, library, notice, tabs, tester, training } from './admin-view.js';
 
-export function admin(config, clinics, store, { documents, decide }) {
+export function admin(config, clinics, store, { documents, feedback, sessions, decide }) {
   const router = express.Router();
-  const csrf = createHmac('sha256', config.adminToken).update('sdr-admin-form-v1').digest('hex');
+  const auth = adminAuth(config, sessions);
   router.use((req, res, next) => {
     res.set({
       'Cache-Control': 'no-store',
       'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
       'Referrer-Policy': 'no-referrer'
     });
-    const [scheme, credential] = (req.get('Authorization') ?? '').split(' ');
-    let token = scheme?.toLowerCase() === 'bearer' ? credential : null;
-    if (scheme?.toLowerCase() === 'basic' && credential) {
-      const decoded = Buffer.from(credential, 'base64').toString('utf8');
-      if (decoded.startsWith('admin:')) token = decoded.slice(6);
-    }
-    if (!equalSecret(token, config.adminToken)) {
-      return res.set('WWW-Authenticate', 'Basic realm="SDR", charset="UTF-8"').sendStatus(401);
-    }
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.get('Sec-Fetch-Site') === 'cross-site') {
       return res.sendStatus(403);
     }
@@ -39,8 +31,13 @@ export function admin(config, clinics, store, { documents, decide }) {
   } }).single('arquivo');
   let extractions = 0;
 
+  router.get('/login', auth.page);
+  router.post('/login', express.urlencoded({ extended: false, limit: '4kb', parameterLimit: 4, inflate: false }), auth.login);
+  router.use(auth.protect);
+  router.post('/sair', form, protect, auth.logout);
+
   function protect(req, res, next) {
-    if (!equalSecret(req.get('X-CSRF-Token') ?? req.body?._csrf, csrf)) return res.sendStatus(403);
+    if (!equalSecret(req.get('X-CSRF-Token') ?? req.body?._csrf, res.locals.csrf)) return res.sendStatus(403);
     next();
   }
   async function selected(req, res, next) {
@@ -59,22 +56,30 @@ export function admin(config, clinics, store, { documents, decide }) {
     const clinic = res.locals.clinic;
     const active = clinic && Object.hasOwn(tabs, tab) ? tab : 'conexao';
     const rows = await clinics.list();
+    const csrf = res.locals.csrf;
     let body;
-    if (active === 'arquivos') {
+    if (['arquivos', 'treinamento', 'feedback'].includes(active)) {
       const file = req.query.arquivo;
       if (file !== undefined && (typeof file !== 'string' || !uuid.test(file))) return res.sendStatus(404);
-      const [docs, selectedFile] = await Promise.all([documents.list(clinic.id), file ? documents.read(clinic.id, file) : null]);
+      const [docs, selectedFile, corrections] = await Promise.all([
+        documents.list(clinic.id), file ? documents.read(clinic.id, file) : null,
+        active === 'feedback' ? feedback.list(clinic.id) : []
+      ]);
       if (file && !selectedFile) return res.sendStatus(404);
-      body = library({ clinic, csrf, docs, selected: selectedFile });
-    } else if (active === 'treinamento') body = training({ clinic, attempted, csrf });
-    else if (active === 'teste') body = tester(clinic, csrf);
+      const lead = active === 'treinamento' ? training({ clinic, attempted, csrf }) :
+        active === 'feedback' ? feedbackView({ clinic, attempted, csrf, corrections }) : '';
+      body = lead + library({ clinic, csrf, docs, selected: selectedFile, tab: active });
+    } else if (active === 'teste') body = tester(clinic, csrf);
     else body = connection({ clinic, attempted, csrf, webhook: clinic ? await clinics.webhookPath(clinic) : null });
     res.status(status).type('html').send(layout({
-      clinics: rows, current: clinic, active, content: notice(message, status >= 400) + body
+      clinics: rows, current: clinic, active, csrf, content: notice(message, status >= 400) + body
     }));
   }
 
-  const messages = { clinic: 'Clínica salva.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.', deleted: 'Arquivo excluído.' };
+  const messages = {
+    clinic: 'Clínica salva.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
+    deleted: 'Arquivo excluído.', feedback: 'Feedback salvo.', feedbackDeleted: 'Feedback excluído.'
+  };
   router.get('/treinar', selected, (req, res) => renderPanel(req, res, {
     message: Object.hasOwn(messages, req.query.salvo) ? messages[req.query.salvo] : ''
   }));
@@ -97,22 +102,44 @@ export function admin(config, clinics, store, { documents, decide }) {
     }
   });
 
+  router.post('/feedback', form, protect, selected, requireClinic, async (req, res) => {
+    const clinicId = res.locals.clinic.id;
+    const content = typeof req.body.conteudo === 'string' ? req.body.conteudo.trim() : '';
+    if (!content || content.includes('\0') || Buffer.byteLength(content) > feedbackBytes) {
+      return renderPanel(req, res, { tab: 'feedback', status: 422, attempted: { conteudo: content },
+        message: 'Digite um feedback de até 1.600 bytes. Acentos podem ocupar mais de um byte.' });
+    }
+    if (!await feedback.save(clinicId, content)) {
+      return renderPanel(req, res, { tab: 'feedback', status: 409, attempted: { conteudo: content },
+        message: 'Não foi possível salvar. Atualize a página e confira o limite de 16 feedbacks por clínica.' });
+    }
+    res.redirect(303, adminUrl(clinicId, 'feedback') + '&salvo=feedback');
+  });
+
+  router.post('/feedback/excluir', form, protect, selected, requireClinic, async (req, res) => {
+    const clinicId = res.locals.clinic.id;
+    const id = req.body.feedback;
+    if (typeof id !== 'string' || !uuid.test(id) || !await feedback.remove(clinicId, id)) return res.sendStatus(404);
+    res.redirect(303, adminUrl(clinicId, 'feedback') + '&salvo=feedbackDeleted');
+  });
+
+  const fileTab = req => ['treinamento', 'feedback'].includes(req.query.aba) ? req.query.aba : 'arquivos';
   router.post('/arquivos', selected, requireClinic, (req, res, next) => {
     upload(req, res, error => {
       if (!error) return next();
       if (!(error instanceof multer.MulterError)) return next(error);
-      renderPanel(req, res, { tab: 'arquivos', status: 422, message: 'Envie um arquivo por vez, com até 5 MB.' }).catch(next);
+      renderPanel(req, res, { tab: fileTab(req), status: 422, message: 'Envie um arquivo por vez, com até 5 MB.' }).catch(next);
     });
   }, protect, async (req, res) => {
     const clinic = res.locals.clinic;
-    if (extractions >= 2) return renderPanel(req, res, { tab: 'arquivos', status: 429, message: 'Há uploads em andamento. Tente novamente em instantes.' });
+    if (extractions >= 2) return renderPanel(req, res, { tab: fileTab(req), status: 429, message: 'Há uploads em andamento. Tente novamente em instantes.' });
     extractions++;
     try {
       await documents.save(clinic.id, await extractDocument(req.file));
-      res.redirect(303, adminUrl(clinic.id, 'arquivos') + '&salvo=uploaded');
+      res.redirect(303, adminUrl(clinic.id, fileTab(req)) + '&salvo=uploaded');
     } catch (error) {
       if (!(error instanceof DocumentError)) throw error;
-      return renderPanel(req, res, { tab: 'arquivos', status: 422, message: error.message });
+      return renderPanel(req, res, { tab: fileTab(req), status: 422, message: error.message });
     } finally {
       extractions--;
     }
@@ -124,7 +151,7 @@ export function admin(config, clinics, store, { documents, decide }) {
     if (typeof fileId !== 'string' || !uuid.test(fileId) || !await documents.remove(clinicId, fileId)) {
       return res.sendStatus(404);
     }
-    res.redirect(303, adminUrl(clinicId, 'arquivos') + '&salvo=deleted');
+    res.redirect(303, adminUrl(clinicId, fileTab(req)) + '&salvo=deleted');
   });
 
   router.post('/simular', json, protect, selected, requireClinic, async (req, res) => {
@@ -135,10 +162,10 @@ export function admin(config, clinics, store, { documents, decide }) {
     const clinic = res.locals.clinic;
     const history = validHistory(req.body.history);
     const search = [text, history.at(-1)?.inbound].filter(Boolean).join(' ');
-    const references = await documents.context(clinic.id, search);
+    const [references, corrections] = await Promise.all([documents.context(clinic.id, search), feedback.list(clinic.id)]);
     try {
       res.json(await simulate({ clinic, text: text.trim(), history, withAI, decide,
-        knowledge: { ...clinicKnowledge(clinic), references } }));
+        knowledge: { ...clinicKnowledge(clinic), references, feedback: corrections.map(row => row.conteudo) } }));
     } catch (error) {
       if (!withAI) throw error;
       const message = [401, 403, 429].includes(error.status)
@@ -151,8 +178,9 @@ export function admin(config, clinics, store, { documents, decide }) {
   router.get('/operacao', selected, async (req, res) => {
     const clinic = res.locals.clinic;
     const rows = await clinics.list();
+    const csrf = res.locals.csrf;
     if (!clinic) return res.type('html').send(layout({
-      clinics: rows, operations: true, content: '<p class="card">Selecione uma clínica.</p>'
+      clinics: rows, csrf, operations: true, content: '<p class="card">Selecione uma clínica.</p>'
     }));
     const action = escape(adminUrl(clinic.id, undefined, 'operacao'));
     const [pending, paused] = await Promise.all([store.pending(clinic.id), store.pausedLeads(clinic.id)]);
@@ -169,7 +197,7 @@ export function admin(config, clinics, store, { documents, decide }) {
       '<form class="entry" action="' + action + '" method="post">' + hidden('_csrf', csrf) +
       hidden('lead', lead) + '<p><code>' + escape(lead.split(':').at(-1)) +
       '</code></p><button name="acao" value="reativar">Reativar IA</button></form>').join('');
-    res.type('html').send(layout({ clinics: rows, current: clinic, operations: true, content:
+    res.type('html').send(layout({ clinics: rows, current: clinic, csrf, operations: true, content:
       '<section class="card"><h2>Eventos que precisam de atenção</h2>' + (jobs || '<p>Nenhum evento pendente.</p>') + '</section>' +
       '<section class="card"><h2>Leads com a IA pausada</h2>' + (pauses || '<p>Nenhum lead pausado.</p>') + '</section>' }));
   });
@@ -181,7 +209,7 @@ export function admin(config, clinics, store, { documents, decide }) {
       ? await store.resume(clinic.id, lead)
       : typeof seq === 'string' && /^\d{1,18}$/.test(seq) && await store.resolve(clinic.id, seq, acao);
     if (!applied) return res.status(409).type('html').send(layout({
-      clinics: await clinics.list(), current: clinic, operations: true,
+      clinics: await clinics.list(), current: clinic, csrf: res.locals.csrf, operations: true,
       content: notice('Atualize a página. Para reativar um lead, resolva a tarefa pendente ou aguarde o processamento.', true)
     }));
     res.redirect(303, adminUrl(clinic.id, undefined, 'operacao'));

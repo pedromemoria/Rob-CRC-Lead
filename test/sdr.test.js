@@ -8,6 +8,8 @@ import { EventEmitter, once } from 'node:events';
 import { PGlite } from '@electric-sql/pglite';
 import { safeReply } from '../src/knowledge.js';
 import { clinicKnowledge, createClinics } from '../src/clinics.js';
+import { createSessions } from '../src/admin-auth.js';
+import { createFeedback } from '../src/feedback.js';
 import { createDocuments, extractDocument } from '../src/documents.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +38,7 @@ async function database(dataDir) {
   await db.exec(schema);
   await db.exec(readFileSync(new URL('../supabase/multi-clinica.sql', import.meta.url), 'utf8'));
   await db.exec(readFileSync(new URL('../supabase/painel-clinicas.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../supabase/admin-saas.sql', import.meta.url), 'utf8'));
   return {
     query: client.query,
     connect: async () => client,
@@ -61,10 +64,12 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   let knowledge = clinicKnowledge(clinic);
   let result;
   let requests = 0;
+  let modelContext;
   const mock = { chat: { completions: { async create(request) {
     assert.equal(request.tool_choice, 'required');
     assert.equal(request.parallel_tool_calls, false);
     requests += 1;
+    modelContext = JSON.parse(request.messages[1].content);
     return result;
   } } } };
   const decide = createAgent({ model: 'gpt-4o' }, mock);
@@ -88,7 +93,9 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   clinic.faq = '# FAQ\n<!-- respostas:sdr -->\nvalor | A consulta custa R$ 120,00.\n<!-- fim:sdr -->\n';
   knowledge = clinicKnowledge(clinic);
   result = modelResult('responder', { resposta_id: 'valor' });
-  assert.equal((await decide({ text: 'Qual o preço?' }, [], knowledge)).text, 'A consulta custa R$ 120,00.');
+  const feedback = ['Priorize o preço publicado quando houver uma pergunta direta.'];
+  assert.equal((await decide({ text: 'Qual o preço?' }, [], { ...knowledge, feedback })).text, 'A consulta custa R$ 120,00.');
+  assert.deepEqual(modelContext.feedbacks_da_clinica, feedback);
   assert.equal(safeReply('Acesse teste.com'), false);
   assert.equal(safeReply('Acesse 127.0.0.1'), false);
   assert.equal(safeReply('Acesse ｈｔｔｐ．com'), false);
@@ -102,7 +109,7 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   const otherId = await clinics.save(clinicForm('ghl', 'other'));
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const config = { adminToken, ghl: { publicKey } };
-  const server = createApp(config, store, clinics, { documents: createDocuments(db) }).listen(0, '127.0.0.1');
+  const server = createApp(config, store, clinics, { documents: createDocuments(db), feedback: createFeedback(db), sessions: createSessions(db) }).listen(0, '127.0.0.1');
   t.after(() => new Promise(resolve => server.close(resolve)));
   await once(server, 'listening');
   const base = 'http://127.0.0.1:' + server.address().port;
@@ -149,8 +156,17 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   assert.equal(await store.claim(), null);
 
   const adminUrl = base + '/admin/treinar';
-  assert.equal((await fetch(adminUrl)).status, 401);
-  const headers = { Authorization: 'Basic ' + Buffer.from('admin:' + adminToken).toString('base64') };
+  const anonymous = await fetch(adminUrl, { redirect: 'manual' });
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get('location'), '/admin/login');
+  assert.equal(anonymous.headers.get('www-authenticate'), null);
+  const login = await fetch(base + '/admin/login', {
+    method: 'POST', redirect: 'manual', body: new URLSearchParams({ email: 'admin@robocrc.local', senha: adminToken })
+  });
+  assert.equal(login.status, 303);
+  const cookie = login.headers.get('set-cookie');
+  assert.match(cookie, /Max-Age=28800; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax/);
+  const headers = { Cookie: cookie.split(';')[0] };
   const html = await (await fetch(adminUrl, { headers })).text();
   const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
   const submit = (url, fields) => fetch(url, {
@@ -185,6 +201,34 @@ test('webhooks reais do Express, validação de assinatura e edição autenticad
   const updated = await (await fetch(editUrl, { headers })).text();
   assert.ok(updated.includes('&lt;/textarea&gt;&lt;script&gt;'));
   assert.doesNotMatch(updated, /<script>|token-secret-branch/);
+
+  await store.enqueue([event('stored-before-disable', ghlId)]);
+  const configUrl = adminUrl + '?clinica=' + ghlId + '&aba=conexao';
+  const updateStatus = async ativo => submit(configUrl, {
+    ...clinicForm('ghl', 'branch'), crm_token: '', _csrf: csrf, ativo,
+    versao: String((await clinics.get(ghlId)).versao)
+  });
+  assert.equal((await updateStatus('nao')).status, 303);
+  assert.equal((await clinics.get(ghlId)).ativo, false);
+  const newBody = ghlBody.replace('"ghi"', '"new-inactive"');
+  const inactive = await fetch(base + '/webhook/ghl/' + ghlId, {
+    method: 'POST', headers: {
+      'Content-Type': 'application/json', 'X-GHL-Signature': sign(null, Buffer.from(newBody), privateKey).toString('base64')
+    }, body: newBody
+  });
+  assert.equal(inactive.status, 200);
+  assert.equal(await store.claim(), null);
+  assert.equal((await updateStatus('sim')).status, 303);
+  const restored = await store.claim();
+  assert.equal(restored.event.eventId, 'stored-before-disable');
+  await store.finish(restored);
+  assert.equal(await store.claim(), null);
+  assert.equal((await submit(base + '/admin/sair', { _csrf: 'errado' })).status, 403);
+  const logout = await submit(base + '/admin/sair', { _csrf: csrf });
+  assert.equal(logout.status, 303);
+  assert.equal(logout.headers.get('location'), '/admin/login');
+  assert.match(logout.headers.get('set-cookie'), /^__Host-crc_session=;/);
+  assert.equal((await fetch(adminUrl, { headers, redirect: 'manual' })).status, 303);
 });
 
 function event(eventId, clinicId, account = 'branch', text = 'Quero agendar') {
@@ -198,6 +242,9 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
   const first = await clinics.save(clinicForm('ghl', 'a', { faq: faq('Alfa') }));
   const secondBooking = 'https://outra.example.com/consulta';
   const second = await clinics.save(clinicForm('ghl', 'b', { faq: faq('Beta'), agendamento_url: secondBooking }));
+  const feedback = createFeedback(db);
+  await feedback.save(first, 'Feedback Alfa');
+  await feedback.save(second, 'Feedback Beta');
   const actions = [];
   const crmFor = integration => ({
     ghl: {
@@ -211,6 +258,7 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
   });
   const decide = async (e, history, training) => {
     assert.equal(training.replies.get('resposta'), e.clinicId === first ? 'Conhecimento Alfa.' : 'Conhecimento Beta.');
+    assert.deepEqual(training.feedback, [e.clinicId === first ? 'Feedback Alfa' : 'Feedback Beta']);
     if (e.eventId === '1') assert.deepEqual(history, []);
     assert.deepEqual(training.references.map(file => file.nome), [e.clinicId === first ? 'alfa.txt' : 'beta.txt']);
     return e.text === 'Humano'
@@ -218,7 +266,7 @@ test('fila usa treinamento, credenciais, links, histórico e pausas de cada clí
   };
   await documents.save(first, await extractDocument({ originalname: 'alfa.txt', buffer: Buffer.from('Documento Alfa') }));
   await documents.save(second, await extractDocument({ originalname: 'beta.txt', buffer: Buffer.from('Documento Beta') }));
-  const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor, documents });
+  const worker = createWorker({ store, decide, integrationFor: clinics.integration, crmFor, documents, feedback });
   const a = event('1', first, 'a');
   const b = event('1', second, 'b');
   await store.enqueue([a, event('2', first, 'a', 'Humano'), event('3', first, 'a'), b]);
@@ -326,10 +374,13 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const first = await clinics.save(clinicForm('ghl', 'first', { faq }));
   const second = await clinics.save(clinicForm('ghl', 'second'));
   const docs = createDocuments(db);
+  const feedback = createFeedback(db);
   let modelRefs;
+  let modelFeedback;
   const server = createApp({ adminToken, ghl: {} }, store, clinics, {
-    documents: docs, decide: async (event, history, knowledge) => {
+    documents: docs, feedback, decide: async (event, history, knowledge) => {
       modelRefs = knowledge.references;
+      modelFeedback = knowledge.feedback;
       return { kind: 'responder', text: replies.convidar, offer: true };
     }
   }).listen(0, '127.0.0.1');
@@ -340,15 +391,32 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const site = id => base + '/admin/treinar?clinica=' + id + '&aba=arquivos';
   const html = await (await fetch(site(first), { headers })).text();
   const csrf = html.match(/name="_csrf" value="([^"]+)"/)[1];
+  const trainingUrl = site(first).replace('aba=arquivos', 'aba=treinamento');
+  const feedbackUrl = site(first).replace('aba=arquivos', 'aba=feedback');
+  for (const url of [trainingUrl, feedbackUrl]) {
+    const html = await (await fetch(url, { headers })).text();
+    assert.match(html, /data-drop/);
+  }
+  const comment = 'Treino exclusivo da clínica. <script>teste</script>';
+  const saveFeedback = await fetch(base + '/admin/feedback?clinica=' + first, {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ _csrf: csrf, conteudo: comment })
+  });
+  assert.equal(saveFeedback.status, 303);
+  assert.match(saveFeedback.headers.get('location'), /aba=feedback/);
+  const added = await (await fetch(feedbackUrl, { headers })).text();
+  assert.match(added, /Treino exclusivo da clínica. &lt;script&gt;/);
+  assert.doesNotMatch(await (await fetch(feedbackUrl.replace(first, second), { headers })).text(), /Treino exclusivo/);
   const makeUpload = () => {
     const form = new FormData();
     form.set('_csrf', csrf);
     form.set('arquivo', new Blob(['Atendimento aos sábados às 10 horas. <script>']), 'atendimento.txt');
     return form;
   };
-  const upload = () => fetch(base + '/admin/arquivos?clinica=' + first,
+  const upload = () => fetch(base + '/admin/arquivos?clinica=' + first + '&aba=treinamento',
     { method: 'POST', headers, body: makeUpload(), redirect: 'manual' });
-  assert.equal((await upload()).status, 303);
+  const uploaded = await upload();
+  assert.equal(uploaded.status, 303);
+  assert.match(uploaded.headers.get('location'), /aba=treinamento/);
   assert.equal((await upload()).status, 422);
   const [file] = await docs.list(first);
   assert.equal((await docs.list(second)).length, 0);
@@ -364,11 +432,23 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   const noAI = await (await simulation(first, false)).json();
   assert.equal(noAI.reply, 'Atendemos aos sábados.');
   assert.deepEqual(noAI.sources, ['atendimento.txt']);
+  assert.equal(noAI.feedbackCount, 1);
   const appointment = await (await simulation(first, false, 'Eu quero agendar')).json();
   assert.match(appointment.reply, /https:\/\/agenda.example.com/);
   assert.equal((await simulation(first, true)).status, 200);
+  assert.deepEqual(modelFeedback, [comment]);
   assert.match(modelRefs[0].trecho, /sábados/);
   assert.deepEqual((await (await simulation(second, false)).json()).sources, []);
+  assert.equal((await simulation(second, true)).status, 200);
+  assert.deepEqual(modelFeedback, []);
+  const [correction] = await feedback.list(first);
+  const removeFeedback = id => fetch(base + '/admin/feedback/excluir?clinica=' + id, {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ _csrf: csrf, feedback: correction.id })
+  });
+  assert.equal((await removeFeedback(second)).status, 404);
+  assert.equal((await removeFeedback(first)).status, 303);
+  assert.equal((await simulation(first, true)).status, 200);
+  assert.deepEqual(modelFeedback, []);
   assert.equal(await store.claim(), null);
   const remove = id => fetch(base + '/admin/arquivos/excluir?clinica=' + id, {
     method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ _csrf: csrf, arquivo: file.id })
@@ -376,4 +456,27 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   assert.equal((await remove(second)).status, 404);
   assert.equal((await remove(first)).status, 303);
   assert.deepEqual(await docs.list(first), []);
+});
+
+test('credenciais personalizadas substituem o fallback e sessões vencidas são recusadas', async t => {
+  const { clinics, db, store } = await fixture(t);
+  const config = { adminToken, adminEmail: 'admin@example.com', adminPassword: 'uma senha extensa de teste', ghl: {} };
+  const server = createApp(config, store, clinics, { sessions: createSessions(db) }).listen(0, '127.0.0.1');
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await once(server, 'listening');
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const login = (email, senha, headers) => fetch(base + '/admin/login', {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ email, senha })
+  });
+  assert.equal((await login('admin@robocrc.local', adminToken)).status, 401);
+  assert.equal((await login(config.adminEmail, config.adminPassword, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await fetch(base + '/admin/treinar', {
+    headers: { Authorization: 'Bearer ' + adminToken }, redirect: 'manual'
+  })).status, 303);
+  const result = await login('ADMIN@example.com', config.adminPassword);
+  assert.equal(result.status, 303);
+  const headers = { Cookie: result.headers.get('set-cookie').split(';')[0] };
+  assert.equal((await fetch(base + '/admin/treinar', { headers })).status, 200);
+  await db.query("UPDATE sdr.admin_sessions SET expires_at=now() - interval '1 second'");
+  assert.equal((await fetch(base + '/admin/treinar', { headers, redirect: 'manual' })).status, 303);
 });

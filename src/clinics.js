@@ -9,7 +9,7 @@ const numeric = /^[1-9]\d{0,14}$/;
 const externalId = /^[A-Za-z0-9_-]{1,128}$/;
 const webhookSecret = /^[A-Za-z0-9_-]{32,128}$/;
 const columns = 'id,nome_clinica,crm_tipo,crm_account_id,kommo_conta_id,funil_id,etapa_agendamento_id,' +
-  'responsavel_id,agendamento_url,regras_negocio,quebra_objecoes,faq,versao';
+  'responsavel_id,agendamento_url,regras_negocio,quebra_objecoes,faq,versao,ativo';
 
 export class ClinicError extends Error {}
 
@@ -53,12 +53,16 @@ function parseSettings(form, current) {
     throw new ClinicError('Informe uma URL de agendamento HTTPS sem credenciais.');
   }
 
+  const active = form.ativo ?? current?.ativo ?? true;
+  if (![true, false, 'sim', 'nao'].includes(active)) throw new ClinicError('Confira o status do atendimento.');
+
   const clinic = {
     id: current?.id ?? randomUUID(),
     nome_clinica: value('nome_clinica', /^[^\u0000-\u001f\u007f]{1,120}$/u, 'Nome da clínica'),
     crm_tipo: type, crm_account_id: account, kommo_conta_id: kommoAccount,
     funil_id: value('funil_id', idPattern, 'Funil'), etapa_agendamento_id: stage,
-    responsavel_id: value('responsavel_id', idPattern, 'Responsável'), agendamento_url: booking
+    responsavel_id: value('responsavel_id', idPattern, 'Responsável'), agendamento_url: booking,
+    ativo: active === true || active === 'sim'
   };
   for (const name of trainingFields) {
     if (typeof form[name] !== 'string' || form[name].includes('\0')) {
@@ -112,7 +116,7 @@ export function createClinics(database, config, templateDir) {
   return {
     templates,
     async list() {
-      const { rows } = await database.query('SELECT id,nome_clinica,crm_tipo FROM sdr.clinicas ORDER BY nome_clinica,id');
+      const { rows } = await database.query('SELECT id,nome_clinica,crm_tipo,ativo FROM sdr.clinicas ORDER BY nome_clinica,id');
       return rows;
     },
     get: id => get(id, columns),
@@ -129,7 +133,7 @@ export function createClinics(database, config, templateDir) {
         throw error;
       }
     },
-    routing: id => get(id, 'id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_hash'),
+    routing: id => get(id, 'id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_hash,ativo'),
     async integration(id) {
       const row = await get(id, columns + ',crm_token');
       if (!row) throw new ClinicError('Clínica inexistente.');
@@ -157,16 +161,16 @@ export function createClinics(database, config, templateDir) {
             'UPDATE sdr.clinicas SET nome_clinica=$1,funil_id=$2,etapa_agendamento_id=$3,responsavel_id=$4,' +
             'agendamento_url=$5,regras_negocio=$6,quebra_objecoes=$7,faq=$8,' +
             'crm_token=COALESCE($9,crm_token),webhook_token_hash=COALESCE($10,webhook_token_hash),versao=versao+1 ' +
-            ' , webhook_token_cifrado=COALESCE($13,webhook_token_cifrado) WHERE id=$11 AND versao=$12',
-            [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook]
+            ' , webhook_token_cifrado=COALESCE($13,webhook_token_cifrado),ativo=$14 WHERE id=$11 AND versao=$12',
+            [...editable, encrypted, webhookHash, clinic.id, current.versao, encryptedWebhook, clinic.ativo]
           );
           if (result.rowCount !== 1) throw new ClinicError('A clínica mudou. Reabra a página e tente novamente.');
         } else {
           await database.query(
             'INSERT INTO sdr.clinicas(nome_clinica,funil_id,etapa_agendamento_id,responsavel_id,' +
-            'agendamento_url,regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_cifrado)' +
-            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
-            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, encryptedWebhook]
+            'agendamento_url,regras_negocio,quebra_objecoes,faq,crm_token,webhook_token_hash,id,crm_tipo,crm_account_id,kommo_conta_id,webhook_token_cifrado,ativo)' +
+            ' VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',
+            [...editable, encrypted, webhookHash, clinic.id, clinic.crm_tipo, clinic.crm_account_id, clinic.kommo_conta_id, encryptedWebhook, clinic.ativo]
           );
         }
       } catch (error) {

@@ -8,7 +8,7 @@ export const hidden = (name, value) => '<input type="hidden" name="' + escape(na
 
 export const tabs = {
   conexao: 'Conexão & CRM', treinamento: 'Treinamento & Prompts',
-  arquivos: 'Arquivos (Base de Conhecimento)', teste: 'Testar Robô'
+  arquivos: 'Arquivos (Base de Conhecimento)', feedback: 'Feedbacks & Aprendizado', teste: 'Testar Robô'
 };
 
 export function adminUrl(clinicId, tab, path = 'treinar') {
@@ -21,19 +21,26 @@ export function adminUrl(clinicId, tab, path = 'treinar') {
 const names = { kommo: 'Kommo', ghl: 'GoHighLevel' };
 const initials = name => name.trim().split(/\s+/).slice(0, 2).map(word => [...word][0]).join('').toUpperCase();
 
-export function layout({ clinics, current, active, content, operations = false }) {
+export function layout({ clinics, current, active, csrf, content, operations = false }) {
   const items = clinics.map(row => {
     const href = adminUrl(row.id, operations ? undefined : active, operations ? 'operacao' : 'treinar');
-    return '<a class="clinic" href="' + escape(href) + '"' + (row.id === current?.id ? ' aria-current="page"' : '') +
+    return '<a class="clinic" data-clinic href="' + escape(href) + '"' + (row.id === current?.id ? ' aria-current="page"' : '') +
       '><span class="avatar" aria-hidden="true">' + escape(initials(row.nome_clinica)) +
-      '</span><span class="clinic-name">' + escape(row.nome_clinica) + '<small>' + escape(names[row.crm_tipo]) + '</small></span></a>';
+      '</span><span class="clinic-name">' + escape(row.nome_clinica) + '<small>' + escape(names[row.crm_tipo]) +
+      ' <span class="clinic-status' + (row.ativo ? ' online' : '') + '">' +
+      (row.ativo ? 'Ativa' : 'Inativa') + '</span></small></span></a>';
   }).join('');
   const side = '<aside class="sidebar"><a class="brand" href="/admin/treinar"><span class="mark" aria-hidden="true">+</span>' +
     '<span>Robô CRC<small>Painel administrativo</small></span></a>' +
-    '<div class="side-label">Clínicas</div><a class="new" href="/admin/treinar">+ Nova Clínica</a>' +
-    '<nav class="clinic-list" aria-label="Clínicas">' + (items || '<p>Nenhuma clínica cadastrada.</p>') + '</nav>' +
-    '<a class="side-link" href="' + escape(adminUrl(current?.id, undefined, operations ? 'treinar' : 'operacao')) + '">' +
-    (operations ? 'Voltar à configuração' : 'Operação da fila') + '</a></aside>';
+    '<div class="side-tools"><a class="new" href="/admin/treinar">+ Nova Clínica</a>' +
+    '<label class="sr-only" for="clinica-busca">Buscar clínica</label>' +
+    '<input id="clinica-busca" type="search" placeholder="Buscar clínica…" autocomplete="off"></div>' +
+    '<nav class="clinic-list" aria-label="Clínicas">' + (items || '<p>Nenhuma clínica cadastrada.</p>') +
+    '<p data-no-match role="status" hidden>Nenhuma clínica encontrada.</p></nav>' +
+    '<div class="side-footer"><a class="side-link" href="' + escape(adminUrl(current?.id, undefined, operations ? 'treinar' : 'operacao')) + '">' +
+    (operations ? 'Voltar à configuração' : 'Operação da fila') +
+    '</a><form action="/admin/sair" method="post">' + hidden('_csrf', csrf) +
+    '<button class="logout" type="submit">Sair</button></form></div></aside>';
   const title = operations ? 'Operação da fila' : current?.nome_clinica ?? 'Nova clínica';
   const navigation = !operations && current ? '<nav class="tabs" aria-label="Seções da clínica">' +
     Object.entries(tabs).map(([value, label]) =>
@@ -96,6 +103,11 @@ export function connection({ clinic, attempted, csrf, webhook }) {
     input(source, 'etapa_agendamento_id', 'ID da etapa de agendamento', 'text', ' required') +
     input(source, 'responsavel_id', 'ID do responsável pelo transbordo', 'text', ' required') +
     input(source, 'agendamento_url', 'URL de agendamento', 'url', ' required') + '</div>' +
+    (clinic ? '<div class="field clinic-toggle"><label for="ativo">Status do atendimento</label>' +
+      '<select id="ativo" name="ativo"><option value="sim"' +
+      (source.ativo === true || source.ativo === 'sim' ? ' selected' : '') + '>Ativa</option><option value="nao"' +
+      (source.ativo === false || source.ativo === 'nao' ? ' selected' : '') +
+      '>Inativa</option></select><small>Uma clínica inativa deixa de receber novos eventos para o robô.</small></div>' : '') +
     '<footer class="form-footer"><button>' + (clinic ? 'Salvar conexão' : 'Cadastrar clínica') + '</button></footer></form>';
 }
 
@@ -112,18 +124,19 @@ export function training({ clinic, attempted, csrf }) {
     '<footer class="form-footer"><button>Salvar treinamento</button></footer></form>';
 }
 
-export function library({ clinic, csrf, docs, selected }) {
-  const url = adminUrl(clinic.id, 'arquivos');
-  const date = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Fortaleza' });
+const date = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Fortaleza' });
+
+export function library({ clinic, csrf, docs, selected, tab }) {
+  const url = adminUrl(clinic.id, tab);
   const list = docs.map(doc => '<li class="file-row"><div class="file-meta"><span class="file-type">' +
     escape(doc.formato.toUpperCase()) + '</span><div><strong>' + escape(doc.nome) + '</strong><small>' +
     escape(date.format(new Date(doc.enviado_em))) + '</small></div></div><div class="file-actions">' +
     '<a class="secondary button" href="' + escape(url + '&arquivo=' + doc.id) + '#conteudo-arquivo">Visualizar</a>' +
-    '<form method="post" action="' + escape(adminUrl(clinic.id, undefined, 'arquivos/excluir')) +
+    '<form method="post" action="' + escape(adminUrl(clinic.id, tab, 'arquivos/excluir')) +
     '" data-confirm="Excluir este documento da base desta clínica?">' + hidden('_csrf', csrf) + hidden('arquivo', doc.id) +
     '<button type="submit" class="danger">Excluir</button></form></div></li>').join('');
   return '<section class="card">' + heading('Arquivos da clínica', 'PDF, DOCX, TXT e CSV. Até 5 MB por envio.') +
-    '<form method="post" enctype="multipart/form-data" action="' + escape(adminUrl(clinic.id, undefined, 'arquivos')) + '">' +
+    '<form method="post" enctype="multipart/form-data" action="' + escape(adminUrl(clinic.id, tab, 'arquivos')) + '">' +
     hidden('_csrf', csrf) + '<label class="drop" for="arquivo" data-drop><strong>Arraste um arquivo aqui</strong>' +
     '<span>ou selecione no seu dispositivo</span><input id="arquivo" name="arquivo" type="file" accept=".pdf,.docx,.txt,.csv" required>' +
     '<span data-filename></span></label><footer class="form-footer"><button>Enviar arquivo</button></footer></form></section>' +
@@ -134,7 +147,7 @@ export function library({ clinic, csrf, docs, selected }) {
 }
 
 export function tester(clinic, csrf) {
-  return '<section class="card chat">' + heading('Simulador de atendimento', 'As mensagens deste teste não são enviadas ao CRM.') +
+  return '<section class="card chat">' + heading('Simulador de atendimento', 'As mensagens deste teste não são enviadas ao CRM. Ative a IA para testar a interpretação dos feedbacks.') +
     '<div class="chat-log" data-chat-log role="log" aria-label="Conversa de teste"><p class="muted" data-empty>' +
     'Envie uma mensagem para iniciar o teste.</p></div><form data-simulator action="' +
     escape(adminUrl(clinic.id, undefined, 'simular')) + '">' + hidden('_csrf', csrf) +
@@ -143,4 +156,36 @@ export function tester(clinic, csrf) {
     '<label for="mensagem">Mensagem do lead</label><div class="composer"><textarea id="mensagem" name="mensagem" ' +
     'placeholder="Ex.: Quais são os horários?" rows="2" maxlength="1000" required></textarea><button>Enviar</button></div>' +
     '<p class="status" data-chat-status role="status"></p></form><noscript>Ative o JavaScript para usar o simulador.</noscript></section>';
+}
+
+export function feedbackView({ clinic, attempted, csrf, corrections }) {
+  const items = [...corrections].reverse().map(row =>
+    '<li class="feedback-row"><div><time datetime="' + escape(new Date(row.criado_em).toISOString()) + '">' +
+    escape(date.format(new Date(row.criado_em))) + '</time><p>' + escape(row.conteudo) + '</p></div>' +
+    '<form method="post" action="' + escape(adminUrl(clinic.id, undefined, 'feedback/excluir')) +
+    '" data-confirm="Excluir este feedback do treinamento da clínica?">' +
+    hidden('_csrf', csrf) + hidden('feedback', row.id) + '<button class="danger">Excluir</button></form></li>'
+  ).join('');
+  return '<form class="card form-card" method="post" action="' +
+    escape(adminUrl(clinic.id, undefined, 'feedback')) + '">' + hidden('_csrf', csrf) +
+    heading('Adicionar feedback', 'Oriente como o robô deve escolher as respostas desta clínica. Para liberar uma nova frase, publique-a em Treinamento & Prompts.') +
+    '<div class="field"><label for="feedback-conteudo">Correção ou exemplo de resposta</label>' +
+    '<textarea id="feedback-conteudo" name="conteudo" maxlength="1600" rows="4" required ' +
+    'placeholder="Ex.: Ao perguntarem o preço, acolha a dúvida antes de informar um valor aprovado.">' +
+    escape(attempted?.conteudo) + '</textarea></div>' +
+    '<footer class="form-footer"><small>' + corrections.length + ' de 16 feedbacks</small><button>Salvar feedback</button></footer></form>' +
+    '<section class="card">' + heading('Feedbacks da clínica') +
+    (items ? '<ul class="file-list">' + items + '</ul>' : '<p class="muted">Nenhum feedback cadastrado.</p>') + '</section>';
+}
+
+export function loginPage(message = '') {
+  return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Entrar · Robô CRC</title>' +
+    '<link rel="stylesheet" href="/admin/assets/panel.css"></head><body class="login-page">' +
+    '<main class="login-main"><div class="login-identity"><span class="mark" aria-hidden="true">+</span>Robô CRC</div>' +
+    '<form class="card login-card" action="/admin/login" method="post"><header><h1>Entrar no painel</h1>' +
+    '<p class="muted">Gerencie as clínicas e seus atendimentos.</p></header>' + notice(message, true) +
+    input({}, 'email', 'E-mail', 'email', ' autocomplete="username" maxlength="254" required') +
+    input({}, 'senha', 'Senha', 'password', ' autocomplete="current-password" maxlength="1024" required') +
+    '<button type="submit">Entrar</button></form></main></body></html>';
 }

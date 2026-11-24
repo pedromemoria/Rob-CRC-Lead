@@ -4,8 +4,9 @@ Agente SDR multi-clínica para Kommo e GoHighLevel. O serviço roda em Node.js 2
 
 ## Atualizar o Supabase
 
-- **Banco multi-clínica já instalado** — Execute [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) em **SQL Editor → New query → Run**.
-- **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql) e por fim [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql).
+- **Banco multi-clínica já instalado** — Execute [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql) em **SQL Editor → New query → Run**.
+- **Painel com biblioteca já instalado** — Execute [supabase/admin-saas.sql](supabase/admin-saas.sql) antes do deploy. O script adiciona sessões, feedbacks e status de atendimento.
+- **Banco novo** — Execute primeiro [supabase/schema.sql](supabase/schema.sql), depois [supabase/multi-clinica.sql](supabase/multi-clinica.sql), [supabase/painel-clinicas.sql](supabase/painel-clinicas.sql) e [supabase/admin-saas.sql](supabase/admin-saas.sql).
 
 A migração pode ser repetida e preserva os registros anteriores. Eventos, pausas e treinamento do sistema anterior permanecem no banco sem associação automática a uma clínica. Cadastre as clínicas e copie para cada cadastro apenas os textos que pertencem a ela. Os webhooks antigos devem ser atualizados para as novas rotas.
 
@@ -25,7 +26,7 @@ O CRM e o link da agenda são configurados no painel. As variáveis fixas antiga
 
 ### Chave de criptografia dos tokens
 
-Os tokens CRM são criptografados com AES-256-GCM. Por padrão, a chave é derivada de `ADMIN_TOKEN`. Para poder trocar a senha administrativa sem regravar os tokens, defina `CRM_ENCRYPTION_KEY` no Render com 64 caracteres hexadecimais aleatórios **antes de cadastrar as clínicas** e mantenha essa chave estável. Se alterar a chave usada para criptografia, regrave os tokens das clínicas. O segredo do webhook Kommo é armazenado como hash para validação e de forma cifrada para permitir copiar o link no painel administrativo. A aba de conexão só exibe o link completo para um administrador autenticado. Se um cadastro antigo só tiver o hash, insira o segredo atual novamente para liberar a cópia.
+Os tokens CRM são criptografados com AES-256-GCM. Por padrão, a chave é derivada de `ADMIN_TOKEN`. Troque a senha do painel com `ADMIN_PASSWORD` e preserve o `ADMIN_TOKEN`. Para usar uma chave dedicada, defina `CRM_ENCRYPTION_KEY` no Render com 64 caracteres hexadecimais aleatórios **antes de cadastrar as clínicas** e mantenha essa chave estável. Se alterar a chave usada para criptografia, regrave os tokens das clínicas. O segredo do webhook Kommo é armazenado como hash para validação e de forma cifrada para permitir copiar o link no painel administrativo. A aba de conexão só exibe o link completo para um administrador autenticado. Se um cadastro antigo só tiver o hash, insira o segredo atual novamente para liberar a cópia.
 
 O Render Free pode hibernar após 15 minutos sem tráfego. O primeiro webhook após a hibernação pode ultrapassar o prazo de resposta do CRM. A fila volta a processar os eventos já gravados quando o serviço acorda.
 
@@ -33,10 +34,10 @@ O Render Free pode hibernar após 15 minutos sem tráfego. O primeiro webhook ap
 
 ## Cadastrar clínicas
 
-1. Abra `/admin/treinar` no domínio do serviço. Use **admin** como usuário e o valor de `ADMIN_TOKEN` como senha.
+1. Abra `/admin/treinar` no domínio do serviço. O painel leva à página de login. Enquanto o par personalizado estiver incompleto ou inválido, use **admin@robocrc.local** e o valor atual de `ADMIN_TOKEN` como senha. Para personalizar, configure os dois campos em **Render → Environment**, com e-mail válido e senha de 16 a 1.024 caracteres. A sessão usa cookie HTTPS com duração de 8 horas. **Sair** encerra a sessão atual.
 2. Clique em **Nova clínica**. Escolha Kommo ou GoHighLevel, preencha a conta, o token, os IDs de funil, etapa e responsável pelo transbordo e a URL HTTPS de agendamento.
 3. Salve e clique em **Copiar Link** na aba **Conexão & CRM**. Cada conta CRM pode ser vinculada a uma única clínica. A conta e o provedor ficam fixos após criar o cadastro para evitar redirecionamento de eventos pendentes. As demais configurações e os textos podem ser editados.
-4. Configure a URL no CRM e valide um evento por clínica. A fila, o histórico e a operação ficam separados por clínica. O login administrativo é central e gerencia todos os cadastros.
+4. Configure a URL no CRM e valide um evento por clínica. A fila, o histórico e a operação ficam separados por clínica. O login administrativo é central e gerencia todos os cadastros. Use a busca da barra lateral para localizar uma clínica. Em **Conexão & CRM**, o status **Inativa** suspende novos eventos e deixa os já enfileirados aguardando reativação. Um evento já em processamento pode concluir.
 
 ### Kommo
 
@@ -70,11 +71,13 @@ valor_consulta | A consulta custa R$ 120,00.
 
 O preço acima é apenas um exemplo de formatação. Publique somente dados comerciais liberados pela equipe. O texto publicado deve ter até 320 caracteres, sem links. Cada campo de treinamento pode ter até 24 KB. O formulário valida e salva a revisão no banco de forma atômica. A nova versão é lida na próxima classificação, inclusive na mesma conversa.
 
-## Arquivos e simulador
+## Feedbacks, arquivos e simulador
 
-- Na aba **Arquivos (Base de Conhecimento)**, envie PDF, DOCX, TXT ou CSV. Você pode arrastar um arquivo ou selecioná-lo. O painel lista nome e data e permite visualizar o texto extraído ou excluir o documento. São aceitos até 5 MB por arquivo, 160 KB de texto extraído e 30 arquivos por clínica. PDFs escaneados precisam passar por OCR antes do envio.
+- Use **Feedbacks & Aprendizado** para salvar correções de comportamento e exemplos da clínica. Os feedbacks ficam no Supabase e são incluídos na próxima consulta à IA. Cada clínica pode manter até 16 feedbacks de 1.600 bytes cada. Exclua os que deixarem de valer. Para autorizar o envio de uma frase nova, publique-a no treinamento.
+
+- Na aba **Arquivos (Base de Conhecimento)**, **Treinamento & Prompts** ou **Feedbacks & Aprendizado**, envie PDF, DOCX, TXT ou CSV. Você pode arrastar um arquivo ou selecioná-lo. O painel lista nome e data e permite visualizar o texto extraído ou excluir o documento. São aceitos até 5 MB por arquivo, 160 KB de texto extraído e 30 arquivos por clínica. PDFs escaneados precisam passar por OCR antes do envio.
 - O Supabase guarda o texto extraído por clínica. O agente consulta até quatro trechos relevantes dos documentos junto com o treinamento. Para autorizar uma frase que possa ser enviada ao lead, coloque-a em um bloco de respostas aprovadas no treinamento.
-- Em **Testar Robô**, mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
+- Em **Testar Robô**, mantenha **Simulação sem IA** marcada para testar com as respostas aprovadas e as regras locais de agendamento e transbordo. Desmarque para testar com OpenAI e verificar a aplicação dos feedbacks. O simulador mantém a conversa na aba do navegador e exibe a ação simulada e os documentos consultados.
 
 ## Operar o agente
 
@@ -96,7 +99,8 @@ O preço acima é apenas um exemplo de formatação. Publique somente dados come
 ├── supabase/
 │   ├── schema.sql
 │   ├── multi-clinica.sql
-│   └── painel-clinicas.sql
+│   ├── painel-clinicas.sql
+│   └── admin-saas.sql
 ├── knowledge/
 │   ├── faq.md
 │   ├── quebra_objecoes.md

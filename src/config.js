@@ -37,6 +37,8 @@ export function loadConfig() {
     host: env.HOST || '0.0.0.0',
     database: { url: databaseUrl, ca: env.DATABASE_SSL_CA?.replace(/\\n/g, '\n') },
     adminToken,
+    adminEmail: env.ADMIN_EMAIL?.trim(),
+    adminPassword: env.ADMIN_PASSWORD,
     crmEncryptionKey,
     openai: { apiKey: required('OPENAI_API_KEY'), model: env.OPENAI_MODEL || 'gpt-4o' },
     ghl: { version: env.GHL_API_VERSION || 'v3', publicKey }

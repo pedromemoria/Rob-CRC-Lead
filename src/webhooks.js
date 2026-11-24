@@ -75,6 +75,7 @@ export function webhooks(config, store, clinics) {
   }, express.urlencoded({ extended: true, limit: '256kb', parameterLimit: 4000, depth: 8, inflate: false }),
   async (req, res) => {
     const clinic = res.locals.clinic;
+    if (!clinic.ativo) return res.sendStatus(200);
     const events = kommoEvents(req.body, { accountId: clinic.kommo_conta_id, subdomain: clinic.crm_account_id });
     await store.enqueue(events.map(event => ({ ...event, clinicId: clinic.id })));
     res.sendStatus(200);
@@ -93,6 +94,7 @@ export function webhooks(config, store, clinics) {
     }
     const clinic = await clinics.routing(req.params.clinicaId);
     if (clinic?.crm_tipo !== 'ghl') return res.sendStatus(404);
+    if (!clinic.ativo) return res.sendStatus(200);
     const events = ghlEvents(body, { locationId: clinic.crm_account_id });
     await store.enqueue(events.map(event => ({ ...event, clinicId: clinic.id })));
     res.sendStatus(200);

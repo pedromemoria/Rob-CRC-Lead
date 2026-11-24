@@ -51,7 +51,8 @@ export function createStore(database) {
     async claim() {
       const { rows } = await database.query(
         "UPDATE sdr.jobs SET state = 'running' WHERE seq = (" +
-        " SELECT j.seq FROM sdr.jobs AS j WHERE j.state = 'queued' AND j.clinica_id IS NOT NULL AND j.due <= now() AND NOT EXISTS (" +
+        " SELECT j.seq FROM sdr.jobs AS j WHERE j.state = 'queued' AND j.clinica_id IS NOT NULL AND j.due <= now()" +
+        " AND EXISTS (SELECT 1 FROM sdr.clinicas AS c WHERE c.id=j.clinica_id AND c.ativo) AND NOT EXISTS (" +
         " SELECT 1 FROM sdr.jobs AS prior WHERE prior.lead = j.lead AND prior.seq < j.seq AND prior.state <> 'done'" +
         ') ORDER BY j.seq LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *'
       );

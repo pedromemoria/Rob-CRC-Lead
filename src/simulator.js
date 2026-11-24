@@ -35,5 +35,9 @@ export async function simulate({ clinic, text, history, withAI, knowledge, decid
       : result.text;
   const action = result.kind === 'qualificar_agendamento' ? 'Mover para agendamento'
     : result.kind === 'transbordo_humano' ? 'Transbordo · ' + handoffReasons[result.reason] : 'Responder ao lead';
-  return { reply, action, offered: Boolean(result.offer), sources: knowledge.references.map(item => item.nome) };
+  return {
+    reply, action, offered: Boolean(result.offer),
+    sources: knowledge.references.map(item => item.nome),
+    feedbackCount: knowledge.feedback?.length ?? 0
+  };
 }

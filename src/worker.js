@@ -8,7 +8,7 @@ function errorStatus(error) {
   return Number.isInteger(status) ? status : 0;
 }
 
-export function createWorker({ store, decide, integrationFor, crmFor, documents, logger = console }) {
+export function createWorker({ store, decide, integrationFor, crmFor, documents, feedback, logger = console }) {
   let timer;
   let active;
   let nextPrune = 0;
@@ -21,8 +21,12 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
     if (!job.plan) {
       const history = await store.history(job);
       const search = [job.event.text, history.at(-1)?.inbound].filter(Boolean).join(' ');
-      const references = documents ? await documents.context(job.clinica_id, search) : [];
-      const decision = await decide(job.event, history, { ...integration.knowledge, references });
+      const [references, corrections] = await Promise.all([
+        documents?.context(job.clinica_id, search) ?? [], feedback?.list(job.clinica_id) ?? []
+      ]);
+      const decision = await decide(job.event, history, {
+        ...integration.knowledge, references, feedback: corrections.map(row => row.conteudo)
+      });
       if (decision.kind === 'transbordo_humano') await store.plan(job, decision, 'handoff');
       else if (decision.kind === 'qualificar_agendamento') await store.plan(job, decision, 'qualify');
       else {
