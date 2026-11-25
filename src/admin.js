@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
@@ -9,9 +10,11 @@ import { adminAuth, loginLimit } from './admin-auth.js';
 import { ClinicDataError, clinicDataFromForm, validateClinicData } from './clinic-data.js';
 import { bookingCallbackToken } from './booking.js';
 import { providerFailureMessage } from './ai-provider.js';
+import { eligibleSalesReply } from './agent.js';
 import { feedbackBytes } from './feedback.js';
+import { safeReply } from './knowledge.js';
 import { simulate, validHistory } from './simulator.js';
-import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, createClinicView, escape, feedbackView, hidden, layout, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
+import { accountsView, activationPage, signupPage, adminUrl, clinicDataView, connection, createClinicView, escape, feedbackView, hidden, layout, learning, library, notice, simulationClinicPicker, tabs, tester, training } from './admin-view.js';
 
 export function admin(config, clinics, store, { accounts, documents, feedback, sessions, decide }) {
   const router = express.Router();
@@ -133,7 +136,7 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
         active === 'feedback' ? feedback.list(clinic.id) : []
       ]);
       if (file && !selectedFile) return res.sendStatus(404);
-      const lead = active === 'treinamento' ? training({ clinic, attempted, csrf }) :
+      const lead = active === 'treinamento' ? learning({ clinic, attempted, csrf }) + training({ clinic, attempted, csrf }) :
         active === 'feedback' ? feedbackView({ clinic, attempted, csrf, corrections }) : '';
       body = lead + library({ clinic, csrf, docs, selected: selectedFile, tab: active });
     } else if (active === 'dados') {
@@ -151,7 +154,8 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
 
   const messages = {
     clinic: 'Clínica salva.', dados: 'Informações salvas.', training: 'Treinamento salvo.', uploaded: 'Arquivo enviado.',
-    deleted: 'Arquivo excluído.', feedback: 'Feedback salvo.', feedbackDeleted: 'Feedback excluído.'
+    deleted: 'Arquivo excluído.', learning: 'Aprendizado salvo para esta clínica.',
+    answer: 'Resposta publicada no FAQ da clínica.', feedback: 'Feedback salvo.', feedbackDeleted: 'Feedback excluído.'
   };
   router.get('/treinar', selected, (req, res) => renderPanel(req, res, {
     message: Object.hasOwn(messages, req.query.salvo) ? messages[req.query.salvo] : ''
@@ -189,6 +193,20 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     if (req.query.aba && !['conexao', 'treinamento'].includes(req.query.aba)) return res.sendStatus(400);
     try {
       if (trainingOnly) {
+        if (req.body?.acao === 'novo_aprendizado') {
+          const content = typeof req.body.conteudo === 'string' ? req.body.conteudo.trim() : '';
+          if (req.body.tipo === 'orientacao') return saveFeedback(req, res, 'treinamento', content);
+          if (req.body.tipo !== 'resposta' || !content || !safeReply(content)) {
+            throw new ClinicError('Escreva uma resposta de até 320 caracteres em uma linha, sem links ou dados de contato.');
+          }
+          if (!eligibleSalesReply(content)) {
+            throw new ClinicError('Use uma informação que o robô possa compartilhar. Cadastre preços em Informações da Clínica.');
+          }
+          const id = 'aprend_' + randomUUID().replaceAll('-', '');
+          const faq = clinic.faq + '\n\n<!-- respostas:sdr -->\n' + id + ' | ' + content + '\n<!-- fim:sdr -->\n';
+          await clinics.saveTraining({ ...clinic, faq, versao: req.body.versao }, clinic);
+          return res.redirect(303, adminUrl(clinic.id, 'treinamento') + '&salvo=answer');
+        }
         await clinics.saveTraining(req.body, clinic);
         return res.redirect(303, adminUrl(clinic.id, 'treinamento') + '&salvo=training');
       }
@@ -211,18 +229,24 @@ export function admin(config, clinics, store, { accounts, documents, feedback, s
     }
   });
 
-  router.post('/feedback', form, protect, selected, requireClinic, async (req, res) => {
+  async function saveFeedback(req, res, tab, content) {
     const clinicId = res.locals.clinic.id;
-    const content = typeof req.body.conteudo === 'string' ? req.body.conteudo.trim() : '';
+    const attempted = { ...req.body, conteudo: content };
+    const learning = tab === 'treinamento';
     if (!content || content.includes('\0') || Buffer.byteLength(content) > feedbackBytes) {
-      return renderPanel(req, res, { tab: 'feedback', status: 422, attempted: { conteudo: content },
-        message: 'Digite um feedback de até 1.600 bytes. Acentos podem ocupar mais de um byte.' });
+      return renderPanel(req, res, { tab, status: 422, attempted,
+        message: 'Digite uma orientação de até 1.600 bytes. Acentos podem ocupar mais de um byte.' });
     }
     if (!await feedback.save(clinicId, content)) {
-      return renderPanel(req, res, { tab: 'feedback', status: 409, attempted: { conteudo: content },
-        message: 'Não foi possível salvar. Atualize a página e confira o limite de 16 feedbacks por clínica.' });
+      return renderPanel(req, res, { tab, status: 409, attempted,
+        message: 'Não foi possível salvar. Confira o limite de 16 orientações da clínica na aba Feedbacks & Aprendizado.' });
     }
-    res.redirect(303, adminUrl(clinicId, 'feedback') + '&salvo=feedback');
+    res.redirect(303, adminUrl(clinicId, tab) + '&salvo=' + (learning ? 'learning' : 'feedback'));
+  }
+
+  router.post('/feedback', form, protect, selected, requireClinic, (req, res) => {
+    const content = typeof req.body.conteudo === 'string' ? req.body.conteudo.trim() : '';
+    return saveFeedback(req, res, 'feedback', content);
   });
 
   router.post('/feedback/excluir', form, protect, selected, requireClinic, async (req, res) => {

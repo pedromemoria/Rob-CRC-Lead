@@ -138,6 +138,24 @@ export function connection({ clinic, attempted, csrf, webhook, bookingToken }) {
     '<footer class="form-footer"><button>' + (connected ? 'Salvar conexão' : 'Conectar CRM') + '</button></footer></form>';
 }
 
+export function learning({ clinic, attempted, csrf }) {
+  const draft = attempted?.acao === 'novo_aprendizado' ? attempted : {};
+  const answer = draft.tipo === 'resposta';
+  return '<form class="card form-card" method="post" action="' + escape(adminUrl(clinic.id, 'treinamento')) + '">' +
+    heading('Ensinar o robô', 'Adicione uma orientação ou uma resposta pronta para esta clínica.') +
+    hidden('_csrf', csrf) + hidden('versao', draft.versao ?? clinic.versao) + hidden('acao', 'novo_aprendizado') +
+    '<div class="field"><label for="aprendizado-tipo">Tipo de aprendizado</label>' +
+    '<select id="aprendizado-tipo" name="tipo">' +
+    '<option value="orientacao">Orientação de atendimento</option><option value="resposta"' +
+    (answer ? ' selected' : '') + '>Resposta que o robô pode enviar</option></select></div>' +
+    '<div class="field"><label for="aprendizado-conteudo">Novo aprendizado</label>' +
+    '<textarea id="aprendizado-conteudo" name="conteudo" maxlength="1600" rows="4" required ' +
+    'aria-describedby="aprendizado-ajuda" placeholder="Ex.: Se perguntarem sobre estacionamento, use a resposta aprovada da clínica.">' +
+    escape(draft.conteudo) + '</textarea><small id="aprendizado-ajuda">' +
+    'As orientações ficam em Feedbacks &amp; Aprendizado. Para publicar uma resposta no FAQ, escreva até 320 caracteres em uma linha.' +
+    '</small></div><footer class="form-footer"><button>Salvar aprendizado</button></footer></form>';
+}
+
 export function training({ clinic, attempted, csrf }) {
   const labels = { regras_negocio: 'Regras de negócio', quebra_objecoes: 'Quebra de objeções', faq: 'FAQ' };
   return '<form class="card form-card" method="post" action="' + escape(adminUrl(clinic.id, 'treinamento')) + '">' +

@@ -74,6 +74,8 @@ Uma conta de equipe pode editar o treinamento, os feedbacks e os arquivos da cl�
 
 ## Treinar e publicar respostas
 
+Na aba **Treinamento & Prompts**, use **Ensinar o robô** para digitar um novo aprendizado. **Orientação de atendimento** salva texto livre em **Feedbacks & Aprendizado** para o robô consultar com IA. **Resposta que o robô pode enviar** publica uma frase aprovada no **FAQ**, disponível para o atendimento e o simulador. Os dois tipos são salvos na clínica selecionada.
+
 Em `/admin/treinar`, selecione uma clínica e edite **Regras de negócio**, **Quebra de objeções** e **FAQ**. O cadastro começa com modelos de `knowledge/`. Ao salvar, o painel grava os três textos no Supabase para aquela clínica. A próxima classificação lê a revisão atualizada.
 
 Escreva o contexto em texto livre. Para autorizar uma frase que possa sair ao lead, adicione-a a um bloco de respostas, com um identificador único e uma frase por linha. O modelo lê as orientações e escolhe o identificador. O servidor envia a frase publicada, preservando seu conteúdo.

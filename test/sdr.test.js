@@ -442,12 +442,24 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
     const html = await (await fetch(url, { headers })).text();
     assert.match(html, /data-drop/);
   }
+  assert.match(await (await fetch(trainingUrl, { headers })).text(), /Novo aprendizado/);
   const comment = 'Treino exclusivo da clínica. <script>teste</script>';
-  const saveFeedback = await fetch(base + '/admin/feedback?clinica=' + first, {
-    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({ _csrf: csrf, conteudo: comment })
+  const answer = 'O estacionamento fica ao lado da clínica.';
+  const version = String((await clinics.get(first)).versao);
+  const saveLearning = (tipo, conteudo, token = csrf) => fetch(trainingUrl, {
+    method: 'POST', headers, redirect: 'manual', body: new URLSearchParams({
+      _csrf: token, acao: 'novo_aprendizado', versao: version, tipo, conteudo
+    })
   });
-  assert.equal(saveFeedback.status, 303);
-  assert.match(saveFeedback.headers.get('location'), /aba=feedback/);
+  assert.equal((await saveLearning('orientacao', comment, 'csrf-invalido')).status, 403);
+  const saved = await saveLearning('orientacao', comment);
+  assert.equal(saved.status, 303);
+  assert.match(saved.headers.get('location'), /aba=treinamento&salvo=learning/);
+  assert.equal((await saveLearning('resposta', 'Acesse https://exemplo.com')).status, 422);
+  assert.equal((await saveLearning('resposta', answer)).status, 303);
+  assert.equal((await saveLearning('resposta', 'Oferecemos estacionamento.')).status, 422);
+  assert.match((await clinics.get(first)).faq, /O estacionamento fica ao lado da clínica/);
+  assert.doesNotMatch((await clinics.get(second)).faq, /estacionamento/);
   const added = await (await fetch(feedbackUrl, { headers })).text();
   assert.match(added, /Treino exclusivo da clínica. &lt;script&gt;/);
   assert.doesNotMatch(await (await fetch(feedbackUrl.replace(first, second), { headers })).text(), /Treino exclusivo/);
@@ -476,6 +488,8 @@ test('biblioteca e simulador ficam isolados por clínica e não gravam eventos r
   });
   const noAI = await (await simulation(first, false)).json();
   assert.equal(noAI.reply, 'Atendemos aos sábados.');
+  const parking = await (await simulation(first, false, 'Tem estacionamento?')).json();
+  assert.equal(parking.reply, answer);
   assert.deepEqual(noAI.sources, []);
   assert.equal(noAI.feedbackCount, 0);
   assert.equal(searches, 0);
