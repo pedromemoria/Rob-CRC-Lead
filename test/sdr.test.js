@@ -76,20 +76,22 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   let result;
   let requests = 0;
   let modelContext;
+  let system;
   const mock = { chat: { completions: { async create(request) {
     assert.equal(request.tool_choice, 'required');
     assert.equal(request.parallel_tool_calls, false);
     requests += 1;
+    system = request.messages[0].content;
     modelContext = JSON.parse(request.messages[1].content);
     return result;
   } } } };
   const decide = createAgent({ model: 'gpt-4o' }, mock);
   result = modelResult('responder', { resposta_id: 'https://malicioso.invalid' });
   assert.match((await decide({ text: 'Oi', leadName: 'Ana Pereira' }, [], knowledge)).text, /Oi, Ana!/);
-  assert.match((await decide({ text: 'Eu quero agendar' }, [], knowledge)).text, /especialidade ou objetivo/);
+  assert.match((await decide({ text: 'Eu quero agendar' }, [], knowledge)).text, /gostaria de melhorar/);
   assert.equal((await decide({ text: 'Eu não quero agendar' }, [], knowledge)).kind, 'responder');
   assert.equal((await decide({ text: 'Sim' }, [], knowledge)).kind, 'responder');
-  assert.equal((await decide({ text: 'Sim' }, [{ offered: true }], knowledge)).text, salesReplies.turno);
+  assert.notEqual((await decide({ text: 'Sim' }, [{ offered: true }], knowledge)).text, salesReplies.turno);
   const offered = [{ outbound: salesReplies.turno, offered: true }];
   assert.deepEqual(await decide({
     text: 'Prefiro à tarde', contactName: 'Ana Pereira', contactPhone: '85999887766'
@@ -108,7 +110,7 @@ test('o modelo só seleciona respostas publicadas e agendamento precisa de evid�
   assert.equal((await decide({ text: 'Qual o preço?' }, [], { ...knowledge, feedback })).text, salesReplies.preco_contexto);
   assert.equal((await decide({ text: 'Insisto, qual o preço?' }, [], knowledge)).text, salesReplies.sem_preco);
   await decide({ text: 'A consulta é presencial?' }, [], { ...knowledge, feedback });
-  assert.deepEqual(modelContext.feedbacks_da_clinica, feedback);
+  assert.ok(system.includes(feedback[0]));
   assert.equal(modelContext.respostas_disponiveis.valor, undefined);
   knowledge.replies.set('convite_antigo', 'Quer receber o link para escolher um horário?');
   knowledge.replies.set('questionario', 'Entendi. Qual seu nome? E seu telefone?');
@@ -650,8 +652,10 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
   const first = await clinics.save(clinicForm('ghl', 'first-data', { faq }));
   const second = await clinics.save(clinicForm('ghl', 'second-data'));
   let modelContext;
+  let modelSystem;
   let selected = 'valor';
   const decide = createAgent({ model: 'gpt-4o' }, { chat: { completions: { async create(request) {
+    modelSystem = request.messages[0].content;
     modelContext = JSON.parse(request.messages[1].content);
     return modelResult('responder', { resposta_id: selected });
   } } } });
@@ -699,7 +703,7 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
   assert.equal((await sim(first, 'Insisto, quanto custa a consulta inicial?', true)).reply, authorizedPrice);
   await sim(first, 'Pode mandar o Google Maps?', true);
   assert.equal(modelContext.dados_da_clinica.contato.maps_url, values.maps_url);
-  assert.deepEqual(modelContext.feedbacks_da_clinica, ['Orientação da primeira clínica']);
+  assert.ok(modelSystem.includes('Orientação da primeira clínica'));
   assert.equal((await sim(first, 'Qual o WhatsApp da recepção?')).reply, 'Telefone ou WhatsApp da recepção: (85) 98888-1234');
   assert.equal((await sim(first, 'Qual o CRM da Dra. Ana Silva?')).reply, 'Profissional: Dra. Ana Silva · Urologia · CRM-CE 12345');
   assert.equal((await sim(first, 'Pode mandar o Google Maps?')).reply, 'Endereço: Rua das Flores, 120');
@@ -731,7 +735,9 @@ test('dados e preços salvam por clínica e alimentam o simulador e a decisão r
 test('clínica criada só com nome pode ser treinada e simulada antes de conectar o CRM', async t => {
   const { clinics, db, store } = await fixture(t);
   let modelContext;
+  let modelSystem;
   const decide = createAgent({ model: 'gpt-4o' }, { chat: { completions: { async create(request) {
+    modelSystem = request.messages[0].content;
     modelContext = JSON.parse(request.messages[1].content);
     return modelResult('responder', { resposta_id: 'cadastro_observacao_0' });
   } } } });
@@ -779,7 +785,7 @@ test('clínica criada só com nome pode ser treinada e simulada antes de conecta
   assert.match((await sim('Qual o preparo para ultrassom?')).reply, /20 minutos/);
   assert.match((await sim('Tem estacionamento?', true)).reply, /Estacionamento gratuito/);
   assert.equal(modelContext.dados_da_clinica.observacoes, notes);
-  assert.equal(modelContext.base_de_conhecimento['regras_negocio.md'], 'Acolha com cuidado.');
+  assert.ok(modelSystem.includes('Acolha com cuidado.'));
   assert.match((await sim('Quero agendar de manhã')).reply, /nome completo/);
   const connectionUrl = view + '&aba=conexao';
   const connection = await (await fetch(base + connectionUrl, { headers })).text();
@@ -942,14 +948,15 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
     assert.equal(request.headers['x-goog-api-key'], 'gemini-for-test');
     const body = JSON.parse(request.body);
     const context = JSON.parse(body.contents[0].parts[0].text);
-    assert.deepEqual(context.feedbacks_da_clinica, ['Atenda com empatia.']);
-    assert.equal(context.documentos_de_referencia[0].nome, 'Guia.pdf');
+    const training = JSON.parse(body.systemInstruction.parts[0].text.split('Treinamento da clínica (referência):\n')[1]);
+    assert.deepEqual(training.feedbacks_da_clinica, ['Atenda com empatia.']);
+    assert.equal(training.documentos_de_referencia[0].nome, 'Guia.pdf');
     assert.equal(context.historico.length, 15);
     assert.deepEqual(context.historico[0], { papel: 'sdr', texto: 'Retorno 12' });
     assert.deepEqual(context.historico.at(-1), { papel: 'sdr', texto: 'Retorno 19' });
-    assert.ok(JSON.stringify(context.documentos_de_referencia).length <= 12_000);
+    assert.ok(JSON.stringify(training.documentos_de_referencia).length <= 12_000);
     assert.equal(body.toolConfig.functionCallingConfig.mode, 'ANY');
-    assert.deepEqual(body.generationConfig, { maxOutputTokens: 1500 });
+    assert.deepEqual(body.generationConfig, { temperature: 0.7, maxOutputTokens: 1500, thinkingConfig: { thinkingLevel: 'LOW' } });
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [
       { functionCall: { name: 'conversar', args: { acolhimento: 'Imagino que encontrar o atendimento certo seja importante para você' } } }
     ] } }] }), { status: responseStatus });
@@ -963,15 +970,14 @@ test('Gemini recebe contexto e chama a OpenAI somente quando o provedor principa
   const history = Array.from({ length: 20 }, (_, index) => ({ inbound: 'Estou pesquisando', outbound: 'Retorno ' + index }));
   const primary = await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge);
   assert.match(primary.text, /encontrar o atendimento certo/);
-  assert.equal(primary.model, 'gemini-2.5-flash');
+  assert.equal(primary.model, 'gemini-3.6-flash');
   assert.equal(fallbackCalls, 0);
   responseStatus = 429;
   assert.equal((await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge)).text, replies.acolher);
-  assert.deepEqual(models, ['gemini-2.5-flash:generateContent', 'gemini-2.5-flash:generateContent',
-    'gemini-2.5-flash-lite:generateContent', 'gemini-3.5-flash-lite:generateContent']);
+  assert.deepEqual(models, ['gemini-3.6-flash:generateContent', 'gemini-3.6-flash:generateContent', 'gemini-3-flash-preview:generateContent']);
   assert.equal(fallbackCalls, 1);
   await decide({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge);
-  assert.equal(models.length, 4);
+  assert.equal(models.length, 3);
   assert.equal(fallbackCalls, 2);
   const onlyGemini = createAgent(config.openai, createAIProvider(config, { fetcher }));
   await assert.rejects(onlyGemini({ text: 'Estou procurando atendimento para um familiar' }, history, knowledge),
@@ -1100,11 +1106,56 @@ test('desejo agendar aciona a IA e mantém a pergunta de fechamento validada', a
   } } } });
   for (const withAI of [true, false]) {
     const message = await simulate({ text: 'DESEJO AGENDAR UMA CONSULTA', withAI, history: [], knowledge, decide });
-    assert.equal(message.reply, 'Claro, posso ajudar a agendar. Qual especialidade ou objetivo você tem em mente?');
+    assert.match(message.reply, withAI ? /gostaria de melhorar/ : /especialidade ou objetivo/);
     assert.equal(message.provider, withAI ? 'Gemini' : undefined);
   }
   assert.equal(calls, 1);
   assert.equal(bookingInterest('Não desejo agendar uma consulta', []), false);
+});
+
+test('conversa consultiva usa o treinamento e confirma interesse antes de coletar dados', async () => {
+  const knowledge = { ...clinicKnowledge(clinicForm('ghl', 'nutro', {
+    regras_negocio: 'Na Nutrologia, entenda primeiro o objetivo dentro da especialidade.'
+  })), feedback: ['Acolha frustração com tentativas anteriores.'],
+  references: [{ nome: 'Nutrologia.pdf', trecho: 'Pergunte se o objetivo é emagrecimento ou disposição.' }] };
+  knowledge.replies.set('avaliacao_nutro', 'Na avaliação, a conversa inclui seus hábitos e objetivos.');
+  const decide = createAgent({ model: 'test' }, { chat: { completions: { async create(request) {
+    const context = JSON.parse(request.messages[1].content);
+    if (context.etapa_consultiva) {
+      assert.match(request.messages[0].content, /entenda primeiro o objetivo/);
+      assert.match(request.messages[0].content, /Acolha frustração/);
+      assert.match(request.messages[0].content, /Nutrologia.pdf/);
+    }
+    if (context.etapa_consultiva === 'objetivo') return modelResult('explorar', {
+      acolhimento: 'Imagino que seja importante encontrar um atendimento que faça sentido para você',
+      pergunta: 'O que você busca na Nutrologia, emagrecer ou ganhar disposição?'
+    });
+    if (context.etapa_consultiva === 'dificuldade') return modelResult('explorar', {
+      acolhimento: 'Entendo a importância desse objetivo para você',
+      pergunta: 'O que costuma dificultar suas tentativas no dia a dia?'
+    });
+    if (context.etapa_consultiva === 'avaliacao') return modelResult('conectar', {
+      acolhimento: 'Imagino como pode ser frustrante tentar tantas vezes',
+      diferencial_id: 'avaliacao_nutro'
+    });
+    return modelResult('conversar', { acolhimento: '' });
+  } } } });
+  const history = [];
+  const send = async text => {
+    const result = await decide({ text }, history, knowledge);
+    history.push({ inbound: text, outbound: result.text, offered: result.offer });
+    assert.doesNotMatch(result.text, /Combinado|Já registrei|encaminhar|localizar o cadastro/i);
+    return result;
+  };
+  const first = await send('Quero agendar Nutrologia');
+  assert.match(first.text, /emagrecer ou ganhar disposição/);
+  assert.doesNotMatch(first.text, /horário|turno|nome completo/);
+  assert.match((await send('Quero emagrecer')).text, /dificultar suas tentativas/);
+  const invite = await send('Já tentei várias vezes e isso me frustra');
+  assert.match(invite.text, /frustrante.*hábitos e objetivos.*Quer marcar a avaliação/);
+  assert.equal(invite.offer, true);
+  assert.match((await send('Pode ser')).text, /manhã ou à tarde/);
+  assert.match((await send('À tarde')).text, /qual é seu nome completo/i);
 });
 
 test('acolhimento evita repetir frases da resposta ou de mensagens anteriores', async () => {
@@ -1162,14 +1213,17 @@ test('IA participa do agendamento inteiro e preserva o horário e os dados priva
     return result;
   };
   assert.match((await send('Oi')).reply, /Como posso ajudar/);
-  assert.match((await send('Quero agendar de manhã')).reply, /nome completo/);
+  assert.match((await send('Quero agendar de manhã')).reply, /gostaria de melhorar/);
+  assert.match((await send('Quero emagrecer')).reply, /sido mais difícil/);
+  assert.match((await send('Já tentei emagrecer e fico frustrada')).reply, /Quer marcar a avaliação/);
+  assert.match((await send('Sim, de manhã')).reply, /nome completo/);
   assert.match((await send('Ana Pereira')).reply, /telefone ou WhatsApp/);
   const offered = await send('85999887766');
   assert.equal(offered.agenda_ofertada.length, 2);
   assert.match(offered.reply, /Encontrei estas opções na agenda/);
   const booked = await send('1');
   assert.ok(booked.reply.includes(offered.agenda_ofertada[0].text));
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 8);
   assert.doesNotMatch(JSON.stringify(calls), /Ana Pereira|85999887766/);
 });
 
@@ -1210,8 +1264,8 @@ test('modelo Gemini indisponível tenta outro Gemini antes de usar a OpenAI', as
   }] };
   const result = await provider.chat.completions.create(request);
   assert.equal(result.provider, 'Gemini');
-  assert.equal(result.model, 'gemini-2.5-flash-lite');
-  assert.deepEqual(modelCalls, ['gemini-2.5-flash:generateContent', 'gemini-2.5-flash-lite:generateContent']);
+  assert.equal(result.model, 'gemini-3.6-flash');
+  assert.deepEqual(modelCalls, ['gemini-2.5-flash:generateContent', 'gemini-3.6-flash:generateContent']);
 });
 
 test('trechos de documentos respeitam o orçamento mesmo com aspas e quebras de linha', () => {

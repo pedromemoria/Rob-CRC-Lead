@@ -2,7 +2,7 @@ import { SlotUnavailable, availableOptions, chosenOption, externalBookingLink, s
 import { ClinicError } from './clinics.js';
 import { OpportunityError } from './crm.js';
 import { clinicFacts } from './clinic-data.js';
-import { addAcknowledgment, bookingHandoffReply, distinctSentences, explicitHandoff, handoffReasons, mentionsOnlineBooking, normalize, wantsAssessment } from './agent.js';
+import { addAcknowledgment, bookingHandoffReply, distinctSentences, explicitHandoff, handoffReasons, mentionsOnlineBooking, normalize, roboticWording, wantsAssessment } from './agent.js';
 import { closingContext, isContactPrompt, mentionsPrice, validSalesReply } from './sales.js';
 import { KnowledgeError, safeReply } from './knowledge.js';
 
@@ -44,7 +44,7 @@ export function createWorker({ store, decide, integrationFor, crmFor, documents,
       return store.finish(job);
     }
     const officialReplies = new Set(clinicFacts(integration.knowledge.clinicData).values());
-    const allowed = text => validSalesReply(text) && !mentionsOnlineBooking(text) &&
+    const allowed = text => validSalesReply(text) && !mentionsOnlineBooking(text) && !roboticWording(text) &&
       (officialReplies.has(text) || (!mentionsPrice(text) && safeReply(text)));
     const allowedDecision = plan => allowed(plan.text) ||
       (allowed(plan.baseText) && plan.text === addAcknowledgment(plan.baseText, plan.acknowledgment));

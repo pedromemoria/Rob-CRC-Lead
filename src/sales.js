@@ -6,10 +6,10 @@ export const salesReplies = {
   situacao: 'Entendo que você esteja buscando orientação. Essa consulta seria para você ou para um familiar?',
   problema: 'Imagino que isso mereça atenção. O que mais te preocupa nessa situação?',
   impacto: 'Faz sentido querer entender isso melhor. Como essa situação tem afetado sua rotina?',
-  necessidade: 'Entendo como isso pode pesar na rotina. Faz sentido conversar com a equipe em uma avaliação?',
-  convite: 'Entendo que você queira esclarecer suas dúvidas. Quer que eu encaminhe seu pedido de consulta?',
+  necessidade: 'Entendo como isso pode pesar na rotina. Quer marcar a avaliação?',
+  convite: 'Entendo que você queira esclarecer suas dúvidas. Quer conversar sobre isso em uma avaliação?',
   convite_alternativo: 'Claro, posso ajudar com o agendamento. Gostaria de fazer uma avaliação?',
-  turno: 'Combinado. Prefere que a equipe verifique horários de manhã ou à tarde?',
+  turno: 'Para eu olhar a agenda, fica melhor de manhã ou à tarde?',
   preco_contexto: 'Entendo que o valor seja importante. A avaliação ajuda a esclarecer o que faz sentido para você. Qual serviço você procura?',
   preco_objecao: 'Faz sentido avaliar o investimento com calma. Quer que a equipe explique o que está incluso na consulta?',
   pensar: 'Claro, é uma decisão importante. Tem alguma dúvida que eu possa esclarecer enquanto você decide?',
@@ -30,7 +30,7 @@ export function preferredTurn(text) {
 export function validSalesReply(text) {
   return typeof text === 'string' && text.trim() && text.length <= 320 &&
     text.split(/\r?\n/).length <= 4 && (text.match(/\?/g)?.length ?? 0) <= 1 &&
-    (!text.includes('?') || /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|com certeza|combinado|otimo|obrigad[oa]|agradeco)\b/.test(normalize(text))) &&
+    (!text.includes('?') || /^(?:oi|ola|entend[oi]|imagino|faz sentido|claro|com certeza|combinado|otimo|obrigad[oa]|agradeco|para|posso|pode|na avaliacao|quero entender)\b/.test(normalize(text))) &&
     !/\b(?:pre[- ]?reserv\w*|(?:horarios?|vagas?) (?:acabando|limitad[oa]s?)|(?:temos|tenho) (?:vaga|disponibilidade|horario)|garant\w* (?:cura|resultado))\b/.test(normalize(text));
 }
 
@@ -45,17 +45,22 @@ const closingPrompts = {
   ],
   turno: [
     salesReplies.turno,
+    'Posso olhar a agenda. Qual turno funciona melhor para você, manhã ou tarde?',
+    'Combinado. Prefere que a equipe verifique horários de manhã ou à tarde?',
     'Claro. Para eu encaminhar o pedido, qual turno funciona melhor para você, manhã ou tarde?',
     'Entendi, você quer agendar. Prefere que a equipe verifique horários de manhã ou à tarde?'
   ],
   nome: [
+    'Para identificar sua consulta, qual é seu nome completo?',
+    'Pode me dizer seu nome e sobrenome?',
     'Ótimo, já registrei o turno de sua preferência. Qual é seu nome completo para a equipe localizar o cadastro?',
     'Entendi. Pode me informar seu nome e sobrenome para encaminhar o pedido?',
     'Entendi sua preferência de turno. Qual é seu nome completo para a equipe localizar o cadastro?'
   ],
   telefone: [
-    'Obrigado. Qual telefone ou WhatsApp com DDD a equipe pode usar para confirmar?',
-    'Tudo bem. Qual é o melhor número para retorno, incluindo o DDD?'
+    'Obrigado. Qual telefone ou WhatsApp com DDD posso usar para a confirmação?',
+    'Tudo bem. Qual é o melhor número para retorno, incluindo o DDD?',
+    'Obrigado. Qual telefone ou WhatsApp com DDD a equipe pode usar para confirmar?'
   ]
 };
 
@@ -139,7 +144,7 @@ export function nonRepeatingDecision(decision, history) {
   }
   const progress = consultativeFallback(history);
   if (!sameReply(progress.text, decision.text)) return progress;
-  return response('Tudo bem. Posso ajudar com uma dúvida sobre a consulta ou encaminhar um pedido de agendamento.');
+  return response('Tudo bem. Posso esclarecer outra dúvida sobre a consulta.');
 }
 
 export function isContactPrompt(outbound) {
@@ -170,7 +175,7 @@ export function closingContext(plan) {
     (phone ? ' Telefone ou WhatsApp: ' + phone + '.' : '');
 }
 
-export function consultativeDecision(text, history, knowledge, booking, event = {}) {
+export function consultativeDecision(text, history, knowledge, booking, event = {}, { requireConsultation = false } = {}) {
   const lead = normalize(text);
   const last = history.at(-1);
   const previous = baseSalesReply(last?.outbound);
@@ -199,12 +204,12 @@ export function consultativeDecision(text, history, knowledge, booking, event = 
   const evaluation = /\b(?:preciso (?:de |fazer )?(?:uma )?avaliacao|faz sentido (?:uma |fazer uma )?avaliacao|quero (?:uma )?consulta)\b/.test(lead) &&
     !/\b(?:nao|talvez|depois)\b/.test(lead);
   const awaitingGoal = closingPrompts.objetivo.includes(previous);
-  if (awaitingGoal && !priceQuestion.test(lead)) {
+  if (!requireConsultation && awaitingGoal && !priceQuestion.test(lead)) {
     return askClosing('turno', previous);
   }
-  if (booking || evaluation) {
+  if (booking || (!requireConsultation && evaluation)) {
     const generic = /^(?:eu )?(?:quero|desejo|gostaria de|pretendo|preciso|posso|como faco para|tem como) (?:agendar|marcar)(?: (?:uma? |a |o )?(?:consulta|avaliacao|horario))?[.!? ]*$/.test(lead);
-    if (generic && !last?.offered && !history.some(step => mentionsGoal(step.inbound ?? ''))) return askClosing('objetivo', previous);
+    if (!requireConsultation && generic && !last?.offered && !history.some(step => mentionsGoal(step.inbound ?? ''))) return askClosing('objetivo', previous);
     return askClosing('turno', previous);
   }
 
@@ -218,7 +223,7 @@ export function consultativeDecision(text, history, knowledge, booking, event = 
     return response(validSalesReply(price) ? price : salesReplies.sem_preco);
   }
   if (/\b(?:ta caro|esta caro|ficou caro|muito caro|fora do orcamento)\b/.test(lead)) return response(salesReplies.preco_objecao);
-  if (/\b(?:sem tempo|nao tenho tempo|rotina corrida|muito ocupad[oa])\b/.test(lead)) return response(salesReplies.tempo);
+  if (!requireConsultation && /\b(?:sem tempo|nao tenho tempo|rotina corrida|muito ocupad[oa])\b/.test(lead)) return response(salesReplies.tempo);
   return null;
 }
 

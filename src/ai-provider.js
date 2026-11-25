@@ -1,10 +1,8 @@
 import OpenAI from 'openai';
 
 const geminiBaseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/';
-export const defaultGeminiModel = 'gemini-2.5-flash';
-const currentGeminiModel = 'gemini-3.5-flash-lite';
-const backupGeminiModel = 'gemini-3.1-flash-lite';
-const legacyGeminiLite = 'gemini-2.5-flash-lite';
+export const defaultGeminiModel = 'gemini-3.6-flash';
+const backupGeminiModel = 'gemini-3-flash-preview';
 const geminiTimeout = 12_000;
 
 function unavailable(status, code, retryAfter) {
@@ -59,7 +57,8 @@ async function geminiCompletion(key, model, request, fetcher, timeout) {
           ])) }
       })) }],
       toolConfig: { functionCallingConfig: { mode: 'ANY' } },
-      generationConfig: { maxOutputTokens: 1500 }
+      generationConfig: { temperature: request.temperature ?? 0.7, maxOutputTokens: 1500,
+        ...(model === defaultGeminiModel || model === backupGeminiModel ? { thinkingConfig: { thinkingLevel: 'LOW' } } : {}) }
     })
   });
   if (!response.ok) {
@@ -77,15 +76,15 @@ async function geminiCompletion(key, model, request, fetcher, timeout) {
   if (calls?.length !== 1 || !request.tools.some(tool => tool.function.name === calls[0].function.name)) {
     throw unavailable(502);
   }
-  return { provider: 'Gemini', model, choices: [{ message: { tool_calls: calls } }] };
+  return { provider: 'Gemini', model: body.modelVersion ?? model, choices: [{ message: { tool_calls: calls } }] };
 }
 
 export function createAIProvider({ geminiKey, geminiModel = defaultGeminiModel, openai }, { fetcher = fetch, fallback } = {}) {
   const client = fallback ?? (openai.apiKey ? new OpenAI({ apiKey: openai.apiKey, timeout: 14_000, maxRetries: 0 }) : null);
   const unavailableModels = new Map();
-  const models = geminiModel === defaultGeminiModel
-    ? [defaultGeminiModel, legacyGeminiLite, currentGeminiModel]
-    : [...new Set([geminiModel, backupGeminiModel])];
+  const primary = /-lite(?:$|-)/u.test(geminiModel) || geminiModel === 'gemini-3.5-flash'
+    ? defaultGeminiModel : geminiModel;
+  const models = [...new Set([primary, defaultGeminiModel, backupGeminiModel])];
   return { chat: { completions: { async create(request) {
     const attempts = [];
     if (geminiKey) {
